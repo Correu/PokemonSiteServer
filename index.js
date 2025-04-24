@@ -59,6 +59,23 @@ io.on("connection", (socket) => {
     console.log(`👥 ${socket.userId} joined room ${roomKey}`);
   });
 
+  socket.on("sendMessage", ({ roomKey, message }, cb) => {
+    const room = rooms[roomKey];
+    if (!room) {
+      return cb?.({ error: "Room not found or expired." });
+    }
+
+    const payload = {
+      senderId: socket.userId,
+      message,
+      timestamp: new Date().toISOString(),
+    };
+
+    io.to(roomKey).emit("receiveMessage", payload);
+    cb?.({ success: true });
+    console.log(`💬 Message from ${socket.userId} to room ${roomKey}: ${message}`);
+  });
+
   // Leave Room / Disconnect
   socket.on("disconnect", () => {
     console.log("❌ Disconnected:", socket.userId);
