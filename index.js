@@ -9,7 +9,7 @@ const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
-const rooms = {}; // { [roomKey]: { hostId, users, timer } }
+const rooms = {}; // { [roomKey]: { hostId, users, timer, battleConfig } }
 const ROOM_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
 // Middleware (optional auth)
@@ -38,6 +38,7 @@ io.on("connection", (socket) => {
       hostId: socket.userId,
       users: [socket.userId],
       timer,
+      battleConfig: null,
     };
 
     cb({ roomKey }); // Return roomKey to frontend
@@ -57,6 +58,27 @@ io.on("connection", (socket) => {
     socket.to(roomKey).emit("playerJoined", socket.userId);
     cb({ success: true, roomKey });
     console.log(`👥 ${socket.userId} joined room ${roomKey}`);
+  });
+
+  // Handle game events
+  socket.on("gameEvent", ({ roomId, data }) => {
+    const room = rooms[roomId];
+    if (!room) {
+      return;
+    }
+
+    // Store battle configuration
+    if (data.level && data.itemQuantity && data.generation) {
+      room.battleConfig = {
+        level: data.level,
+        itemQuantity: data.itemQuantity,
+        generation: data.generation,
+      };
+    }
+
+    // Broadcast the game event to all users in the room
+    io.to(roomId).emit("gameEvent", data);
+    console.log(`🎮 Game event in room ${roomId}:`, data);
   });
 
   socket.on("sendMessage", ({ roomKey, message }, cb) => {
@@ -102,7 +124,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Optional: Host can manually close room
+  // close room
   socket.on("closeRoom", (roomKey) => {
     const room = rooms[roomKey];
     if (room && room.hostId === socket.userId) {
