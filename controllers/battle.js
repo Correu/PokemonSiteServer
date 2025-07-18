@@ -1,5 +1,8 @@
 const { nanoid } = require("nanoid");
 
+const rooms = {}; // { [roomKey]: { hostId, users, timer, battleConfig } }
+const ROOM_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+
 module.exports = (io, socket) => {
   //user creates a room
   const createRoom = (req, res) => {

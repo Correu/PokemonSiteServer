@@ -9,8 +9,6 @@ const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
-const rooms = {}; // { [roomKey]: { hostId, users, timer, battleConfig } }
-const ROOM_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
 // Middleware (optional auth)
 io.use((socket, next) => {
