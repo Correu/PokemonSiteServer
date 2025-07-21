@@ -9,6 +9,7 @@ const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
+const battleController = require("./controllers/battle");
 
 // Middleware (optional auth)
 io.use((socket, next) => {
@@ -18,26 +19,7 @@ io.use((socket, next) => {
 });
 
 io.on("connection", (socket) => {
-  // Handle game events
-  socket.on("gameEvent", ({ roomId, data }) => {
-    const room = rooms[roomId];
-    if (!room) {
-      return;
-    }
-
-    // Store battle configuration
-    if (data.level && data.itemQuantity && data.generation) {
-      room.battleConfig = {
-        level: data.level,
-        itemQuantity: data.itemQuantity,
-        generation: data.generation,
-      };
-    }
-
-    // Broadcast the game event to all users in the room
-    io.to(roomId).emit("gameEvent", data);
-    console.log(`🎮 Game event in room ${roomId}:`, data);
-  });
+  battleController(socket, io);
 });
 
 const PORT = process.env.PORT || 3000;

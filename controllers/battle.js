@@ -116,4 +116,34 @@ module.exports = (io, socket) => {
       }
     });
   };
+
+  //game event
+  const gameEvent = (req, res) => {
+    socket.on("gameEvent", ({ roomId, data }) => {
+      const room = rooms[roomId];
+      if (!room) {
+        return;
+      }
+
+      // Store battle configuration
+      if (data.level && data.itemQuantity && data.generation) {
+        room.battleConfig = {
+          level: data.level,
+          itemQuantity: data.itemQuantity,
+          generation: data.generation,
+        };
+      }
+
+      // Broadcast the game event to all users in the room
+      io.to(roomId).emit("gameEvent", data);
+      console.log(`🎮 Game event in room ${roomId}:`, data);
+    });
+  };
+
+  socket.on("battle:gameEvent", gameEvent);
+  socket.on("battle:createRoom", createRoom);
+  socket.on("battle:joinRoom", joinRoom);
+  socket.on("battle:sendMessage", sendMessage);
+  socket.on("battle:closeRoom", closeRoom);
+  socket.on("battle:leaveRoom", leaveRoom);
 };
