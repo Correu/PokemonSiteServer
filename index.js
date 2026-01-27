@@ -10,6 +10,7 @@ const io = new Server(server, {
 });
 
 const battleController = require("./controllers/battle");
+const encounterController = require("./controllers/encounters");
 
 // Middleware (optional auth)
 io.use((socket, next) => {
@@ -19,7 +20,7 @@ io.use((socket, next) => {
 });
 
 io.on("connection", (socket) => {
-  battleController(socket, io);
+  battleController(io, socket);
 });
 
 const PORT = process.env.PORT || 3000;
