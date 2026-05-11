@@ -17,3 +17,10 @@ run `docker compose up -build` to run the application with Docker Compose
 
 ### Through Node
 run `node index.js` to run the application with Node.js.
+
+## Scaling and cost controls
+
+- **Default path (most cost-effective):** run one Node instance and keep in-memory rooms.
+- **When traffic grows:** set `REDIS_URL` to enable Socket.io Redis pub/sub across instances.
+- **CORS hardening:** set `CORS_ORIGIN` (comma-separated list supported) instead of `*`.
+- **Compose includes Redis** for local validation of multi-instance event fan-out.

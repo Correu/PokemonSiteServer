@@ -1,12 +1,16 @@
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
-const { nanoid } = require("nanoid"); // for room keys
+const { createAdapter } = require("@socket.io/redis-adapter");
+const { createClient } = require("redis");
 
 const app = express();
 const server = http.createServer(app);
+
+const corsOrigin = process.env.CORS_ORIGIN || "http://localhost:4200";
+const corsOrigins = corsOrigin.split(",").map((origin) => origin.trim());
 const io = new Server(server, {
-  cors: { origin: "*", methods: ["GET", "POST"] },
+  cors: { origin: corsOrigins, methods: ["GET", "POST"] },
 });
 
 const battleController = require("./controllers/battle");
@@ -24,6 +28,32 @@ io.on("connection", (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
-});
+const REDIS_URL = process.env.REDIS_URL;
+
+async function setupRedisAdapterIfEnabled() {
+  if (!REDIS_URL) {
+    console.log("ℹ️ Redis adapter disabled (REDIS_URL not set).");
+    return;
+  }
+
+  const pubClient = createClient({ url: REDIS_URL });
+  const subClient = pubClient.duplicate();
+  await Promise.all([pubClient.connect(), subClient.connect()]);
+  io.adapter(createAdapter(pubClient, subClient));
+  console.log("✅ Redis adapter enabled for Socket.io.");
+}
+
+async function startServer() {
+  try {
+    await setupRedisAdapterIfEnabled();
+    server.listen(PORT, () => {
+      console.log(`🚀 Server running on http://localhost:${PORT}`);
+      console.log(`🌐 Allowed CORS origins: ${corsOrigins.join(", ")}`);
+    });
+  } catch (error) {
+    console.error("❌ Failed to start server:", error);
+    process.exit(1);
+  }
+}
+
+startServer();
