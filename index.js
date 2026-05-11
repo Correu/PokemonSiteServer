@@ -5,6 +5,29 @@ const { createAdapter } = require("@socket.io/redis-adapter");
 const { createClient } = require("redis");
 
 const app = express();
+
+function getCorsOrigin() {
+  const raw = process.env.CORS_ORIGIN;
+  if (!raw || String(raw).trim() === "") {
+    return "*";
+  }
+  const list = String(raw)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (list.length === 0) {
+    return "*";
+  }
+  if (list.length === 1) {
+    return list[0];
+  }
+  return list;
+}
+
+app.get("/health", (_req, res) => {
+  res.status(200).json({ ok: true });
+});
+
 const server = http.createServer(app);
 
 const corsOrigin = process.env.CORS_ORIGIN || "http://localhost:4200";

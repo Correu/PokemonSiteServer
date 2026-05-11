@@ -44,10 +44,19 @@ module.exports = (io, socket) => {
       return cb({ error: "Room not found or expired." });
     }
 
-    socket.join(roomKey);
-    room.users.push(socket.userId);
+    const alreadyInRoom = room.users.includes(socket.userId);
+    if (!alreadyInRoom && room.users.length >= 2) {
+      return cb({ error: "Room is full." });
+    }
 
-    socket.to(roomKey).emit("playerJoined", socket.userId);
+    if (!alreadyInRoom) {
+      room.users.push(socket.userId);
+    }
+
+    socket.join(roomKey);
+    if (!alreadyInRoom) {
+      socket.to(roomKey).emit("playerJoined", socket.userId);
+    }
     cb({ success: true, roomKey });
     console.log(`👥 ${socket.userId} joined room ${roomKey}`);
   });
