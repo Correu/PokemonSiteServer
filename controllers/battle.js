@@ -1,14 +1,40 @@
 const { nanoid } = require("nanoid");
 
-const rooms = {}; // { [roomKey]: { hostId, users, timer, battleConfig } }
-const ROOM_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+const rooms = {};
+const ROOM_TIMEOUT_MS = 30 * 60 * 1000;
+const DEFAULT_MAX_PLAYERS = 2;
+
+function getMaxPlayers(room) {
+  return room.battleConfig?.maxPlayers ?? DEFAULT_MAX_PLAYERS;
+}
+
+function mergeBattleConfig(room, data) {
+  room.battleConfig = {
+    level: data.level ?? room.battleConfig?.level ?? 50,
+    teamSize: data.teamSize ?? room.battleConfig?.teamSize ?? 6,
+    useItems: data.useItems ?? room.battleConfig?.useItems ?? false,
+    itemQuantity: data.itemQuantity ?? room.battleConfig?.itemQuantity ?? 0,
+    format: data.format ?? room.battleConfig?.format ?? "singles",
+    maxPlayers: data.maxPlayers ?? room.battleConfig?.maxPlayers ?? DEFAULT_MAX_PLAYERS,
+    generation: data.generation ?? room.battleConfig?.generation ?? null,
+  };
+}
+
+function roomSnapshot(room) {
+  return {
+    battleConfig: room.battleConfig,
+    status: room.status,
+    users: [...room.users],
+    maxPlayers: getMaxPlayers(room),
+    battleInfo: room.battleInfo,
+  };
+}
 
 module.exports = (io, socket) => {
   console.log("🔌 User connected:", socket.userId);
 
-  // Create Room
   socket.on("createRoom", (_, cb) => {
-    const roomKey = nanoid(6); // e.g., "af9D4z"
+    const roomKey = nanoid(6);
     socket.join(roomKey);
 
     const timer = setTimeout(() => {
@@ -23,21 +49,24 @@ module.exports = (io, socket) => {
       users: [socket.userId],
       timer,
       battleConfig: null,
+      status: "lobby",
+      battleInfo: null,
+      readyPlayers: [],
     };
 
-    cb({ roomKey }); // Return roomKey to frontend
+    cb({ roomKey });
     console.log(`🛠️ Room ${roomKey} created by ${socket.userId}`);
   });
 
-  //user joins a room
   socket.on("joinRoom", (roomKey, cb) => {
     const room = rooms[roomKey];
     if (!room) {
       return cb({ error: "Room not found or expired." });
     }
 
+    const maxPlayers = getMaxPlayers(room);
     const alreadyInRoom = room.users.includes(socket.userId);
-    if (!alreadyInRoom && room.users.length >= 2) {
+    if (!alreadyInRoom && room.users.length >= maxPlayers) {
       return cb({ error: "Room is full." });
     }
 
@@ -49,11 +78,15 @@ module.exports = (io, socket) => {
     if (!alreadyInRoom) {
       socket.to(roomKey).emit("playerJoined", socket.userId);
     }
-    cb({ success: true, roomKey });
+
+    cb({
+      success: true,
+      roomKey,
+      ...roomSnapshot(room),
+    });
     console.log(`👥 ${socket.userId} joined room ${roomKey}`);
   });
 
-  //send message
   socket.on("sendMessage", ({ roomKey, message }, cb) => {
     const room = rooms[roomKey];
     if (!room) {
@@ -68,12 +101,8 @@ module.exports = (io, socket) => {
 
     io.to(roomKey).emit("receiveMessage", payload);
     cb?.({ success: true });
-    console.log(
-      `💬 Message from ${socket.userId} to room ${roomKey}: ${message}`
-    );
   });
 
-  //user closes a room
   socket.on("closeRoom", (roomKey) => {
     const room = rooms[roomKey];
     if (room && room.hostId === socket.userId) {
@@ -85,41 +114,79 @@ module.exports = (io, socket) => {
     }
   });
 
-  //game event
   socket.on("gameEvent", ({ roomId, data }) => {
     const room = rooms[roomId];
-    if (!room) {
+    if (!room || !data?.type) {
       return;
     }
 
-    // Store battle configuration
-    if (data.level !== undefined) {
-      room.battleConfig = {
-        level: data.level,
-        itemQuantity: data.itemQuantity || 0,
-        generation: data.generation || null,
-        useItems: data.useItems || false,
-      };
-      console.log(`⚙️ Battle config saved for room ${roomId}:`, room.battleConfig);
+    data.senderId = socket.userId;
+
+    switch (data.type) {
+      case "battleConfig":
+        if (room.hostId !== socket.userId || room.status !== "lobby") {
+          return;
+        }
+        if (data.config) {
+          mergeBattleConfig(room, data.config);
+          room.status = "waiting";
+        }
+        break;
+
+      case "playerReady":
+        if (!room.readyPlayers.includes(socket.userId)) {
+          room.readyPlayers.push(socket.userId);
+        }
+        break;
+
+      case "battleStart":
+        if (room.hostId !== socket.userId) {
+          return;
+        }
+        room.status = "in-battle";
+        room.battleInfo = {
+          startedAt: new Date().toISOString(),
+          turn: 0,
+        };
+        break;
+
+      case "battleState":
+        if (!room.battleInfo) {
+          room.battleInfo = { turn: 0, states: {} };
+        }
+        if (!room.battleInfo.states) {
+          room.battleInfo.states = {};
+        }
+        room.battleInfo.states[socket.userId] = data.field ?? null;
+        if (typeof data.field?.turn === "number") {
+          room.battleInfo.turn = data.field.turn;
+        }
+        break;
+
+      case "battleAction":
+        if (data.action?.message && room.battleInfo) {
+          room.battleInfo.lastMessage = data.action.message;
+        }
+        break;
+
+      default:
+        return;
     }
 
-    // Broadcast the game event to all users in the room
     io.to(roomId).emit("gameEvent", data);
-    console.log(`🎮 Game event in room ${roomId}:`, data);
+    console.log(`🎮 ${data.type} in room ${roomId} from ${socket.userId}`);
   });
 
-  //user leaves a room / Disconnect
   socket.on("disconnect", () => {
     console.log("❌ Disconnected:", socket.userId);
 
-    // Cleanup from all rooms
     for (const [roomKey, room] of Object.entries(rooms)) {
       const index = room.users.indexOf(socket.userId);
       if (index !== -1) {
         room.users.splice(index, 1);
+        room.readyPlayers = room.readyPlayers.filter((id) => id !== socket.userId);
         socket.to(roomKey).emit("playerLeft", socket.userId);
 
-        // If host left or room is empty
         if (room.hostId === socket.userId || room.users.length === 0) {
           clearTimeout(room.timer);
           delete rooms[roomKey];
