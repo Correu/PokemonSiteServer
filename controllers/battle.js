@@ -30,6 +30,14 @@ function roomSnapshot(room) {
   };
 }
 
+function isGameEventEnvelope(value) {
+  if (!value || typeof value !== "object") return false;
+  if (typeof value.type !== "string") return false;
+  if (value.version !== 1) return false;
+  if (!value.payload || typeof value.payload !== "object") return false;
+  return true;
+}
+
 module.exports = (io, socket) => {
   console.log("🔌 User connected:", socket.userId);
 
@@ -119,7 +127,12 @@ module.exports = (io, socket) => {
     if (!room || !data?.type) {
       return;
     }
+    if (!isGameEventEnvelope(data)) {
+      console.log(`⚠️ Invalid game event payload in room ${roomId}.`);
+      return;
+    }
 
+<<<<<<< HEAD
     data.senderId = socket.userId;
 
     switch (data.type) {
@@ -171,6 +184,18 @@ module.exports = (io, socket) => {
 
       default:
         return;
+=======
+    // Store battle configuration
+    if (data.type === "battle:config") {
+      const payload = data.payload;
+      room.battleConfig = {
+        level: payload.level,
+        itemQuantity: payload.itemQuantity || 0,
+        generation: payload.generation || null,
+        useItems: payload.useItems || false,
+      };
+      console.log(`⚙️ Battle config saved for room ${roomId}:`, room.battleConfig);
+>>>>>>> 239a083a933ff7b83736083a19d2080bf3ca2ce0
     }
 
     io.to(roomId).emit("gameEvent", data);

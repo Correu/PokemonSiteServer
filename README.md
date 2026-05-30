@@ -14,7 +14,17 @@ Socket.io server for peer-to-peer battles in the Angular web app ([PokemonSite](
 
 ### Through Docker
 
-From this directory:
+### Through Node
+
+run `node index.js` to run the application with Node.js.
+
+## Scaling and cost controls
+
+- **Default path (most cost-effective):** run one Node instance and keep in-memory rooms.
+- **When traffic grows:** set `REDIS_URL` to enable Socket.io Redis pub/sub across instances.
+- **CORS hardening:** set `CORS_ORIGIN` (comma-separated list supported) instead of `*`.
+- **Compose includes Redis** for local validation of multi-instance event fan-out.
+  From this directory:
 
 ```bash
 docker compose up --build
@@ -64,8 +74,8 @@ If the Angular app is loaded over **HTTPS**, browsers may block plain **HTTP** W
 
 Copy [.env.example](.env.example) and set values as needed. This project does not load `.env` automatically; use your shell, Docker `environment`, or a process manager to set variables (or add `dotenv` locally if you prefer).
 
-| Variable       | Default    | Purpose                                      |
-| -------------- | ---------- | -------------------------------------------- |
-| `PORT`         | `3000`     | HTTP / Socket.IO port                        |
-| `HOST`         | `0.0.0.0` | Bind address (`127.0.0.1` for local only)    |
-| `CORS_ORIGIN`  | `*`        | Optional comma-separated allowed origins     |
+| Variable      | Default   | Purpose                                   |
+| ------------- | --------- | ----------------------------------------- |
+| `PORT`        | `3000`    | HTTP / Socket.IO port                     |
+| `HOST`        | `0.0.0.0` | Bind address (`127.0.0.1` for local only) |
+| `CORS_ORIGIN` | `*`       | Optional comma-separated allowed origins  |
