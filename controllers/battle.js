@@ -15,7 +15,8 @@ function mergeBattleConfig(room, data) {
     useItems: data.useItems ?? room.battleConfig?.useItems ?? false,
     itemQuantity: data.itemQuantity ?? room.battleConfig?.itemQuantity ?? 0,
     format: data.format ?? room.battleConfig?.format ?? "singles",
-    maxPlayers: data.maxPlayers ?? room.battleConfig?.maxPlayers ?? DEFAULT_MAX_PLAYERS,
+    maxPlayers:
+      data.maxPlayers ?? room.battleConfig?.maxPlayers ?? DEFAULT_MAX_PLAYERS,
     generation: data.generation ?? room.battleConfig?.generation ?? null,
   };
 }
@@ -132,7 +133,6 @@ module.exports = (io, socket) => {
       return;
     }
 
-<<<<<<< HEAD
     data.senderId = socket.userId;
 
     switch (data.type) {
@@ -184,18 +184,6 @@ module.exports = (io, socket) => {
 
       default:
         return;
-=======
-    // Store battle configuration
-    if (data.type === "battle:config") {
-      const payload = data.payload;
-      room.battleConfig = {
-        level: payload.level,
-        itemQuantity: payload.itemQuantity || 0,
-        generation: payload.generation || null,
-        useItems: payload.useItems || false,
-      };
-      console.log(`⚙️ Battle config saved for room ${roomId}:`, room.battleConfig);
->>>>>>> 239a083a933ff7b83736083a19d2080bf3ca2ce0
     }
 
     io.to(roomId).emit("gameEvent", data);
@@ -209,7 +197,9 @@ module.exports = (io, socket) => {
       const index = room.users.indexOf(socket.userId);
       if (index !== -1) {
         room.users.splice(index, 1);
-        room.readyPlayers = room.readyPlayers.filter((id) => id !== socket.userId);
+        room.readyPlayers = room.readyPlayers.filter(
+          (id) => id !== socket.userId,
+        );
         socket.to(roomKey).emit("playerLeft", socket.userId);
 
         if (room.hostId === socket.userId || room.users.length === 0) {
@@ -217,7 +207,7 @@ module.exports = (io, socket) => {
           delete rooms[roomKey];
           io.in(roomKey).socketsLeave(roomKey);
           console.log(
-            `🧹 Room ${roomKey} closed due to host disconnect or empty room.`
+            `🧹 Room ${roomKey} closed due to host disconnect or empty room.`,
           );
         }
       }
