@@ -28,15 +28,24 @@ function roomSnapshot(room) {
     users: [...room.users],
     maxPlayers: getMaxPlayers(room),
     battleInfo: room.battleInfo,
+    readyForTeamSelect:
+      room.users.length >= getMaxPlayers(room) && !!room.battleConfig,
   };
 }
 
-function isGameEventEnvelope(value) {
-  if (!value || typeof value !== "object") return false;
-  if (typeof value.type !== "string") return false;
-  if (value.version !== 1) return false;
-  if (!value.payload || typeof value.payload !== "object") return false;
-  return true;
+function maybeBroadcastAllPlayersConnected(io, roomKey, room) {
+  if (
+    room.users.length >= getMaxPlayers(room) &&
+    room.battleConfig &&
+    room.status === "waiting"
+  ) {
+    room.status = "team-select";
+    io.to(roomKey).emit("gameEvent", {
+      type: "allPlayersConnected",
+      users: [...room.users],
+    });
+    console.log(`✅ Room ${roomKey} — all players connected, team select open`);
+  }
 }
 
 module.exports = (io, socket) => {
@@ -88,6 +97,8 @@ module.exports = (io, socket) => {
       socket.to(roomKey).emit("playerJoined", socket.userId);
     }
 
+    maybeBroadcastAllPlayersConnected(io, roomKey, room);
+
     cb({
       success: true,
       roomKey,
@@ -128,10 +139,6 @@ module.exports = (io, socket) => {
     if (!room || !data?.type) {
       return;
     }
-    if (!isGameEventEnvelope(data)) {
-      console.log(`⚠️ Invalid game event payload in room ${roomId}.`);
-      return;
-    }
 
     data.senderId = socket.userId;
 
@@ -143,6 +150,7 @@ module.exports = (io, socket) => {
         if (data.config) {
           mergeBattleConfig(room, data.config);
           room.status = "waiting";
+          maybeBroadcastAllPlayersConnected(io, roomId, room);
         }
         break;
 
@@ -152,15 +160,24 @@ module.exports = (io, socket) => {
         }
         break;
 
+      case "teamSelect":
+        if (room.status !== "team-select" && room.status !== "waiting") {
+          return;
+        }
+        if (!room.battleInfo) {
+          room.battleInfo = { selections: {} };
+        }
+        if (!room.battleInfo.selections) {
+          room.battleInfo.selections = {};
+        }
+        room.battleInfo.selections[socket.userId] = data.battler ?? null;
+        break;
+
       case "battleStart":
         if (room.hostId !== socket.userId) {
           return;
         }
         room.status = "in-battle";
-        room.battleInfo = {
-          startedAt: new Date().toISOString(),
-          turn: 0,
-        };
         break;
 
       case "battleState":
@@ -181,6 +198,9 @@ module.exports = (io, socket) => {
           room.battleInfo.lastMessage = data.action.message;
         }
         break;
+
+      case "allPlayersConnected":
+        return;
 
       default:
         return;
