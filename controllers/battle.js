@@ -3,9 +3,16 @@ const { nanoid } = require("nanoid");
 const rooms = {}; // { [roomKey]: { hostId, users, timer, battleConfig } }
 const ROOM_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
+const ALLOWED_GAME_EVENT_TYPES = new Set([
+  "battle:config",
+  "battle:turn",
+  "battle:matchStart",
+]);
+
 function isGameEventEnvelope(value) {
   if (!value || typeof value !== "object") return false;
   if (typeof value.type !== "string") return false;
+  if (!ALLOWED_GAME_EVENT_TYPES.has(value.type)) return false;
   if (value.version !== 1) return false;
   if (!value.payload || typeof value.payload !== "object") return false;
   return true;
@@ -58,6 +65,19 @@ module.exports = (io, socket) => {
       socket.to(roomKey).emit("playerJoined", socket.userId);
     }
     cb({ success: true, roomKey });
+    // Late joiners miss the initial battle:config broadcast; replay from stored config.
+    if (room.battleConfig) {
+      socket.emit("gameEvent", {
+        type: "battle:config",
+        version: 1,
+        payload: {
+          level: room.battleConfig.level,
+          itemQuantity: room.battleConfig.itemQuantity,
+          generation: room.battleConfig.generation,
+          useItems: room.battleConfig.useItems,
+        },
+      });
+    }
     console.log(`👥 ${socket.userId} joined room ${roomKey}`);
   });
 
@@ -114,6 +134,11 @@ module.exports = (io, socket) => {
         useItems: payload.useItems || false,
       };
       console.log(`⚙️ Battle config saved for room ${roomId}:`, room.battleConfig);
+    }
+
+    if (data.type === "battle:matchStart") {
+      room.matchStartedAt = data.payload?.startedAt ?? null;
+      console.log(`▶️ Match start in room ${roomId}`);
     }
 
     // Broadcast the game event to all users in the room
