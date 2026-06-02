@@ -30,10 +30,9 @@ app.get("/health", (_req, res) => {
 
 const server = http.createServer(app);
 
-const corsOrigin = process.env.CORS_ORIGIN || "http://localhost:4200";
-const corsOrigins = corsOrigin.split(",").map((origin) => origin.trim());
+const corsOrigin = getCorsOrigin();
 const io = new Server(server, {
-  cors: { origin: corsOrigins, methods: ["GET", "POST"] },
+  cors: { origin: corsOrigin, methods: ["GET", "POST"] },
 });
 
 const battleController = require("./controllers/battle");
@@ -50,7 +49,8 @@ io.on("connection", (socket) => {
   battleController(io, socket);
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
+const HOST = process.env.HOST || "0.0.0.0";
 const REDIS_URL = process.env.REDIS_URL;
 
 async function setupRedisAdapterIfEnabled() {
@@ -69,9 +69,11 @@ async function setupRedisAdapterIfEnabled() {
 async function startServer() {
   try {
     await setupRedisAdapterIfEnabled();
-    server.listen(PORT, () => {
-      console.log(`🚀 Server running on http://localhost:${PORT}`);
-      console.log(`🌐 Allowed CORS origins: ${corsOrigins.join(", ")}`);
+    server.listen(PORT, HOST, () => {
+      console.log(`🚀 Server listening on ${HOST}:${PORT}`);
+      console.log(
+        `🌐 Socket.IO CORS: ${Array.isArray(corsOrigin) ? corsOrigin.join(", ") : corsOrigin}`
+      );
     });
   } catch (error) {
     console.error("❌ Failed to start server:", error);
