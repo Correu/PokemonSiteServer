@@ -4,7 +4,6 @@ const rooms = {};
 const ROOM_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_PLAYERS = 2;
 
-<<<<<<< HEAD
 const ALLOWED_GAME_EVENT_TYPES = new Set([
   "battle:config",
   "battle:turn",
@@ -18,50 +17,6 @@ function isGameEventEnvelope(value) {
   if (value.version !== 1) return false;
   if (!value.payload || typeof value.payload !== "object") return false;
   return true;
-=======
-function getMaxPlayers(room) {
-  return room.battleConfig?.maxPlayers ?? DEFAULT_MAX_PLAYERS;
-}
-
-function mergeBattleConfig(room, data) {
-  room.battleConfig = {
-    level: data.level ?? room.battleConfig?.level ?? 50,
-    teamSize: data.teamSize ?? room.battleConfig?.teamSize ?? 6,
-    useItems: data.useItems ?? room.battleConfig?.useItems ?? false,
-    itemQuantity: data.itemQuantity ?? room.battleConfig?.itemQuantity ?? 0,
-    format: data.format ?? room.battleConfig?.format ?? "singles",
-    maxPlayers:
-      data.maxPlayers ?? room.battleConfig?.maxPlayers ?? DEFAULT_MAX_PLAYERS,
-    generation: data.generation ?? room.battleConfig?.generation ?? null,
-  };
-}
-
-function roomSnapshot(room) {
-  return {
-    battleConfig: room.battleConfig,
-    status: room.status,
-    users: [...room.users],
-    maxPlayers: getMaxPlayers(room),
-    battleInfo: room.battleInfo,
-    readyForTeamSelect:
-      room.users.length >= getMaxPlayers(room) && !!room.battleConfig,
-  };
-}
-
-function maybeBroadcastAllPlayersConnected(io, roomKey, room) {
-  if (
-    room.users.length >= getMaxPlayers(room) &&
-    room.battleConfig &&
-    room.status === "waiting"
-  ) {
-    room.status = "team-select";
-    io.to(roomKey).emit("gameEvent", {
-      type: "allPlayersConnected",
-      users: [...room.users],
-    });
-    console.log(`✅ Room ${roomKey} — all players connected, team select open`);
-  }
->>>>>>> 8e4ea97d2d37c83925bdc3b20b7d5ef82e7183ca
 }
 
 module.exports = (io, socket) => {
@@ -112,7 +67,6 @@ module.exports = (io, socket) => {
     if (!alreadyInRoom) {
       socket.to(roomKey).emit("playerJoined", socket.userId);
     }
-<<<<<<< HEAD
     cb({ success: true, roomKey });
     // Late joiners miss the initial battle:config broadcast; replay from stored config.
     if (room.battleConfig) {
@@ -127,16 +81,6 @@ module.exports = (io, socket) => {
         },
       });
     }
-=======
-
-    maybeBroadcastAllPlayersConnected(io, roomKey, room);
-
-    cb({
-      success: true,
-      roomKey,
-      ...roomSnapshot(room),
-    });
->>>>>>> 8e4ea97d2d37c83925bdc3b20b7d5ef82e7183ca
     console.log(`👥 ${socket.userId} joined room ${roomKey}`);
   });
 
@@ -239,15 +183,12 @@ module.exports = (io, socket) => {
         return;
     }
 
-<<<<<<< HEAD
     if (data.type === "battle:matchStart") {
       room.matchStartedAt = data.payload?.startedAt ?? null;
       console.log(`▶️ Match start in room ${roomId}`);
     }
 
     // Broadcast the game event to all users in the room
-=======
->>>>>>> 8e4ea97d2d37c83925bdc3b20b7d5ef82e7183ca
     io.to(roomId).emit("gameEvent", data);
     console.log(`🎮 ${data.type} in room ${roomId} from ${socket.userId}`);
   });
