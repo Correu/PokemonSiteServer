@@ -246,13 +246,11 @@ module.exports = (io, socket) => {
       return cb?.({ error: "Room not found or expired." });
     }
 
-    const payload = {
+    io.to(roomKey).emit("receiveMessage", {
       senderId: socket.userId,
       message,
       timestamp: new Date().toISOString(),
-    };
-
-    io.to(roomKey).emit("receiveMessage", payload);
+    });
     cb?.({ success: true });
   });
 
@@ -266,7 +264,6 @@ module.exports = (io, socket) => {
       delete rooms[roomKey];
       io.to(roomKey).emit("roomClosed");
       io.in(roomKey).socketsLeave(roomKey);
-      console.log(`🚪 Room ${roomKey} closed by host.`);
     }
   });
 
@@ -419,17 +416,23 @@ module.exports = (io, socket) => {
     }
 
     switch (data.type) {
-      case "battleConfig":
+      case "battle:config":
         if (room.hostId !== socket.userId || room.status !== "lobby") {
           return;
         }
-        if (data.config) {
-          mergeBattleConfig(room, data.config);
+        if (data.version === 1 && data.payload) {
+          mergeBattleConfig(room, data.payload);
           room.status = "waiting";
         }
-        break;
+        return;
 
-      case "playerReady":
+      case "battle:ready":
+        if (!room.users.includes(socket.userId)) {
+          return;
+        }
+        if (room.status === "countdown" || room.status === "team-select") {
+          return;
+        }
         if (!room.readyPlayers.includes(socket.userId)) {
           room.readyPlayers.push(socket.userId);
         }
@@ -443,39 +446,22 @@ module.exports = (io, socket) => {
         if (!room.battleInfo) {
           room.battleInfo = { selections: {} };
         }
-        if (!room.battleInfo.selections) {
-          room.battleInfo.selections = {};
-        }
-        room.battleInfo.selections[socket.userId] = data.battler ?? null;
-        break;
+        io.to(roomId).emit("gameEvent", readyStateEnvelope(room));
+        checkAllReadyAndCountdown(io, roomId, room);
+        return;
 
-      case "battleStart":
+      case "battle:matchStart":
         if (room.hostId !== socket.userId) {
           return;
         }
-        room.status = "in-battle";
-        break;
+        room.status = "team-select";
+        room.matchStartedAt = data.payload?.startedAt ?? new Date().toISOString();
+        clearCountdown(room);
+        io.to(roomId).emit("gameEvent", data);
+        return;
 
-      case "battleState":
-        if (!room.battleInfo) {
-          room.battleInfo = { turn: 0, states: {} };
-        }
-        if (!room.battleInfo.states) {
-          room.battleInfo.states = {};
-        }
-        room.battleInfo.states[socket.userId] = data.field ?? null;
-        if (typeof data.field?.turn === "number") {
-          room.battleInfo.turn = data.field.turn;
-        }
-        break;
-
-      case "battleAction":
-        if (data.action?.message && room.battleInfo) {
-          room.battleInfo.lastMessage = data.action.message;
-        }
-        break;
-
-      case "allPlayersConnected":
+      case "battle:turn":
+        io.to(roomId).emit("gameEvent", data);
         return;
 
       default:
@@ -487,8 +473,6 @@ module.exports = (io, socket) => {
   });
 
   socket.on("disconnect", () => {
-    console.log("❌ Disconnected:", socket.userId);
-
     for (const [roomKey, room] of Object.entries(rooms)) {
       const index = room.users.indexOf(socket.userId);
       if (index !== -1) {

@@ -32,7 +32,7 @@ const server = http.createServer(app);
 
 const corsOrigin = getCorsOrigin();
 const io = new Server(server, {
-  cors: { origin: corsOrigin, methods: ["GET", "POST"] },
+  cors: { origin: corsOrigin, methods: ["GET", "POST", "OPTIONS"] },
 });
 
 const battleController = require("./controllers/battle");
