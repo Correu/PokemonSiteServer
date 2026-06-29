@@ -1,13 +1,21 @@
 const { nanoid } = require("nanoid");
+const battleEngine = require("./battle-engine");
 
 const rooms = {};
 const ROOM_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_PLAYERS = 2;
+const COUNTDOWN_MS = 3000;
 
 const ALLOWED_GAME_EVENT_TYPES = new Set([
   "battle:config",
   "battle:turn",
   "battle:matchStart",
+  "battle:ready",
+  "battle:readyState",
+  "battle:countdown",
+  "battle:teamLock",
+  "battle:stateUpdate",
+  "battle:forfeit",
 ]);
 
 function isGameEventEnvelope(value) {
@@ -17,6 +25,144 @@ function isGameEventEnvelope(value) {
   if (value.version !== 1) return false;
   if (!value.payload || typeof value.payload !== "object") return false;
   return true;
+}
+
+function getMaxPlayers(room) {
+  return room.battleConfig?.maxPlayers ?? DEFAULT_MAX_PLAYERS;
+}
+
+function mergeBattleConfig(room, payload) {
+  room.battleConfig = {
+    level: payload.level ?? room.battleConfig?.level ?? 50,
+    teamSize: payload.teamSize ?? room.battleConfig?.teamSize ?? 6,
+    useItems: payload.useItems ?? room.battleConfig?.useItems ?? false,
+    itemQuantity: payload.itemQuantity ?? room.battleConfig?.itemQuantity ?? 0,
+    format: payload.format ?? room.battleConfig?.format ?? "singles",
+    maxPlayers:
+      payload.maxPlayers ??
+      room.battleConfig?.maxPlayers ??
+      DEFAULT_MAX_PLAYERS,
+  };
+}
+
+function configReplayPayload(room) {
+  const c = room.battleConfig;
+  if (!c) return null;
+  return {
+    level: c.level,
+    itemQuantity: c.itemQuantity,
+    useItems: c.useItems,
+    teamSize: c.teamSize,
+    maxPlayers: c.maxPlayers,
+    format: c.format,
+  };
+}
+
+function roomSnapshot(room, roomKey) {
+  return {
+    success: true,
+    roomKey,
+    battleConfig: room.battleConfig,
+    status: room.status,
+    users: [...room.users],
+    playerCount: room.users.length,
+    maxPlayers: getMaxPlayers(room),
+    matchStarted: !!room.matchStartedAt,
+    readyForTeamSelect:
+      room.status === "team-select" || !!room.matchStartedAt,
+    readyPlayerIds: [...room.readyPlayers],
+    countdownEndsAt: room.countdownEndsAt ?? null,
+  };
+}
+
+function presencePayload(room) {
+  const maxPlayers = getMaxPlayers(room);
+  return {
+    readyPlayerIds: [...room.readyPlayers],
+    requiredCount: maxPlayers,
+    allReady: false,
+    playerCount: room.users.length,
+    maxPlayers,
+  };
+}
+
+function broadcastReadyState(io, roomId, room) {
+  const maxPlayers = getMaxPlayers(room);
+  const allReady =
+    room.users.length >= maxPlayers &&
+    room.readyPlayers.length >= maxPlayers;
+
+  io.to(roomId).emit("gameEvent", {
+    type: "battle:readyState",
+    version: 1,
+    payload: {
+      readyPlayerIds: [...room.readyPlayers],
+      requiredCount: maxPlayers,
+      allReady,
+      playerCount: room.users.length,
+      maxPlayers,
+    },
+  });
+
+  if (allReady && !room.countdownEndsAt && !room.matchStartedAt) {
+    startMatchCountdown(io, roomId, room);
+  }
+}
+
+function startMatchCountdown(io, roomId, room) {
+  const endsAt = new Date(Date.now() + COUNTDOWN_MS).toISOString();
+  room.countdownEndsAt = endsAt;
+
+  io.to(roomId).emit("gameEvent", {
+    type: "battle:countdown",
+    version: 1,
+    payload: {
+      seconds: Math.ceil(COUNTDOWN_MS / 1000),
+      endsAt,
+    },
+  });
+
+  if (room.countdownTimer) {
+    clearTimeout(room.countdownTimer);
+  }
+
+  room.countdownTimer = setTimeout(() => {
+    const current = rooms[roomId];
+    if (!current || current.matchStartedAt) {
+      return;
+    }
+    current.matchStartedAt = new Date().toISOString();
+    current.status = "team-select";
+    current.countdownEndsAt = null;
+
+    io.to(roomId).emit("gameEvent", {
+      type: "battle:matchStart",
+      version: 1,
+      payload: {
+        roomKey: roomId,
+        startedAt: current.matchStartedAt,
+        hostSocketId: current.hostId,
+      },
+    });
+    console.log(`▶️ Match start in room ${roomId}`);
+  }, COUNTDOWN_MS);
+}
+
+function broadcastBattleState(io, roomId, room) {
+  const payload = battleEngine.buildStatePayload(room);
+  io.to(roomId).emit("gameEvent", {
+    type: "battle:stateUpdate",
+    version: 1,
+    payload,
+  });
+}
+
+function broadcastRoomPresence(io, roomId, room) {
+  io.to(roomId).emit("gameEvent", {
+    type: "battle:readyState",
+    version: 1,
+    payload: presencePayload(room),
+  });
 }
 
 module.exports = (io, socket) => {
@@ -41,14 +187,23 @@ module.exports = (io, socket) => {
       status: "lobby",
       battleInfo: null,
       readyPlayers: [],
+      matchStartedAt: null,
+      countdownEndsAt: null,
+      countdownTimer: null,
     };
 
-    cb({ roomKey });
+    const room = rooms[roomKey];
+    cb({ roomKey, ...roomSnapshot(room, roomKey) });
     console.log(`🛠️ Room ${roomKey} created by ${socket.userId}`);
   });
 
   socket.on("joinRoom", (roomKey, cb) => {
-    const room = rooms[roomKey];
+    const key = String(roomKey ?? "").trim();
+    if (!key) {
+      return cb({ error: "Room code is required." });
+    }
+
+    const room = rooms[key];
     if (!room) {
       return cb({ error: "Room not found or expired." });
     }
@@ -61,27 +216,28 @@ module.exports = (io, socket) => {
 
     if (!alreadyInRoom) {
       room.users.push(socket.userId);
+      socket.to(key).emit("playerJoined", socket.userId);
+      broadcastRoomPresence(io, key, room);
     }
 
-    socket.join(roomKey);
-    if (!alreadyInRoom) {
-      socket.to(roomKey).emit("playerJoined", socket.userId);
-    }
-    cb({ success: true, roomKey });
-    // Late joiners miss the initial battle:config broadcast; replay from stored config.
+    socket.join(key);
+
+    cb(roomSnapshot(room, key));
+
     if (room.battleConfig) {
-      socket.emit("gameEvent", {
-        type: "battle:config",
-        version: 1,
-        payload: {
-          level: room.battleConfig.level,
-          itemQuantity: room.battleConfig.itemQuantity,
-          generation: room.battleConfig.generation,
-          useItems: room.battleConfig.useItems,
-        },
-      });
+      const replay = configReplayPayload(room);
+      if (replay) {
+        socket.emit("gameEvent", {
+          type: "battle:config",
+          version: 1,
+          payload: replay,
+        });
+      }
     }
-    console.log(`👥 ${socket.userId} joined room ${roomKey}`);
+
+    console.log(
+      `👥 ${socket.userId} joined room ${key} (${room.users.length}/${maxPlayers})`,
+    );
   });
 
   socket.on("sendMessage", ({ roomKey, message }, cb) => {
@@ -103,6 +259,9 @@ module.exports = (io, socket) => {
   socket.on("closeRoom", (roomKey) => {
     const room = rooms[roomKey];
     if (room && room.hostId === socket.userId) {
+      if (room.countdownTimer) {
+        clearTimeout(room.countdownTimer);
+      }
       clearTimeout(room.timer);
       delete rooms[roomKey];
       io.to(roomKey).emit("roomClosed");
@@ -119,6 +278,146 @@ module.exports = (io, socket) => {
 
     data.senderId = socket.userId;
 
+    if (data.type === "battle:config" && isGameEventEnvelope(data)) {
+      if (room.hostId !== socket.userId) {
+        return;
+      }
+      mergeBattleConfig(room, data.payload);
+      room.status = "waiting";
+      io.to(roomId).emit("gameEvent", data);
+      console.log(`⚙️ Battle config saved for room ${roomId}:`, room.battleConfig);
+      return;
+    }
+
+    if (data.type === "battle:ready" && isGameEventEnvelope(data)) {
+      if (!room.users.includes(socket.userId) || room.matchStartedAt) {
+        return;
+      }
+      if (!room.readyPlayers.includes(socket.userId)) {
+        room.readyPlayers.push(socket.userId);
+      }
+      broadcastReadyState(io, roomId, room);
+      return;
+    }
+
+    if (data.type === "battle:matchStart" && isGameEventEnvelope(data)) {
+      if (room.hostId !== socket.userId) {
+        return;
+      }
+      room.matchStartedAt = data.payload?.startedAt ?? new Date().toISOString();
+      room.status = "team-select";
+      battleEngine.ensureBattleInfo(room);
+      io.to(roomId).emit("gameEvent", data);
+      console.log(`▶️ Match start in room ${roomId}`);
+      return;
+    }
+
+    if (data.type === "battle:teamLock" && isGameEventEnvelope(data)) {
+      if (!room.users.includes(socket.userId)) {
+        socket.emit("gameEvent", {
+          type: "battle:stateUpdate",
+          version: 1,
+          payload: {
+            turn: 0,
+            message: "Reconnect to the room before locking your team.",
+            actives: {},
+            teamRemaining: {},
+            awaitingMoves: [],
+            lockedPlayers: room.battleInfo?.lockedPlayers ?? [],
+            winnerId: null,
+            battleStarted: false,
+          },
+        });
+        return;
+      }
+      if (room.status === "finished") {
+        return;
+      }
+      const battlers = data.payload?.battlers;
+      const result = battleEngine.lockTeam(room, socket.userId, battlers);
+      if (result.error) {
+        socket.emit("gameEvent", {
+          type: "battle:stateUpdate",
+          version: 1,
+          payload: {
+            turn: 0,
+            message: result.error,
+            actives: {},
+            teamRemaining: {},
+            awaitingMoves: [],
+            lockedPlayers: room.battleInfo?.lockedPlayers ?? [],
+            winnerId: null,
+          },
+        });
+        return;
+      }
+      broadcastBattleState(io, roomId, room);
+      if (result.started) {
+        console.log(`⚔️ Battle started in room ${roomId}`);
+      }
+      return;
+    }
+
+    if (data.type === "battle:turn" && isGameEventEnvelope(data)) {
+      if (!room.users.includes(socket.userId) || room.status !== "in-battle") {
+        return;
+      }
+      const { moveId, turnNumber } = data.payload ?? {};
+      const result = battleEngine.submitMove(
+        room,
+        socket.userId,
+        moveId,
+        turnNumber,
+      );
+      if (result.error) {
+        socket.emit("gameEvent", {
+          type: "battle:stateUpdate",
+          version: 1,
+          payload: {
+            turn: room.battleInfo?.turn ?? 0,
+            message: result.error,
+            actives: battleEngine.buildStatePayload(room).actives,
+            teamRemaining: battleEngine.buildStatePayload(room).teamRemaining,
+            awaitingMoves: battleEngine.buildStatePayload(room).awaitingMoves,
+            lockedPlayers: room.battleInfo?.lockedPlayers ?? [],
+            winnerId: room.battleInfo?.winnerId ?? null,
+          },
+        });
+        return;
+      }
+      broadcastBattleState(io, roomId, room);
+      if (result.winnerId) {
+        console.log(`🏆 Winner in room ${roomId}: ${result.winnerId}`);
+      }
+      return;
+    }
+
+    if (data.type === "battle:forfeit" && isGameEventEnvelope(data)) {
+      if (!room.users.includes(socket.userId) || room.status !== "in-battle") {
+        return;
+      }
+      const result = battleEngine.forfeitMatch(room, socket.userId);
+      if (result.error) {
+        socket.emit("gameEvent", {
+          type: "battle:stateUpdate",
+          version: 1,
+          payload: {
+            turn: room.battleInfo?.turn ?? 0,
+            message: result.error,
+            actives: battleEngine.buildStatePayload(room).actives,
+            teamRemaining: battleEngine.buildStatePayload(room).teamRemaining,
+            awaitingMoves: [],
+            lockedPlayers: room.battleInfo?.lockedPlayers ?? [],
+            winnerId: room.battleInfo?.winnerId ?? null,
+          },
+        });
+        return;
+      }
+      broadcastBattleState(io, roomId, room);
+      console.log(`🏳️ Forfeit in room ${roomId}; winner ${result.winnerId}`);
+      return;
+    }
+
     switch (data.type) {
       case "battleConfig":
         if (room.hostId !== socket.userId || room.status !== "lobby") {
@@ -127,7 +426,6 @@ module.exports = (io, socket) => {
         if (data.config) {
           mergeBattleConfig(room, data.config);
           room.status = "waiting";
-          maybeBroadcastAllPlayersConnected(io, roomId, room);
         }
         break;
 
@@ -135,7 +433,8 @@ module.exports = (io, socket) => {
         if (!room.readyPlayers.includes(socket.userId)) {
           room.readyPlayers.push(socket.userId);
         }
-        break;
+        broadcastReadyState(io, roomId, room);
+        return;
 
       case "teamSelect":
         if (room.status !== "team-select" && room.status !== "waiting") {
@@ -183,12 +482,6 @@ module.exports = (io, socket) => {
         return;
     }
 
-    if (data.type === "battle:matchStart") {
-      room.matchStartedAt = data.payload?.startedAt ?? null;
-      console.log(`▶️ Match start in room ${roomId}`);
-    }
-
-    // Broadcast the game event to all users in the room
     io.to(roomId).emit("gameEvent", data);
     console.log(`🎮 ${data.type} in room ${roomId} from ${socket.userId}`);
   });
@@ -203,15 +496,25 @@ module.exports = (io, socket) => {
         room.readyPlayers = room.readyPlayers.filter(
           (id) => id !== socket.userId,
         );
+        if (room.countdownTimer) {
+          clearTimeout(room.countdownTimer);
+          room.countdownTimer = null;
+          room.countdownEndsAt = null;
+        }
         socket.to(roomKey).emit("playerLeft", socket.userId);
 
         if (room.hostId === socket.userId || room.users.length === 0) {
+          if (room.countdownTimer) {
+            clearTimeout(room.countdownTimer);
+          }
           clearTimeout(room.timer);
           delete rooms[roomKey];
           io.in(roomKey).socketsLeave(roomKey);
           console.log(
             `🧹 Room ${roomKey} closed due to host disconnect or empty room.`,
           );
+        } else {
+          broadcastRoomPresence(io, roomKey, room);
         }
       }
     }
