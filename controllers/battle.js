@@ -32,11 +32,28 @@ function getMaxPlayers(room) {
 }
 
 function mergeBattleConfig(room, payload) {
+  const useItems = payload.useItems ?? room.battleConfig?.useItems ?? false;
+  const itemSlotCount =
+    payload.itemSlotCount ??
+    payload.itemQuantity ??
+    room.battleConfig?.itemSlotCount ??
+    room.battleConfig?.itemQuantity ??
+    (useItems ? 6 : 0);
+
   room.battleConfig = {
     level: payload.level ?? room.battleConfig?.level ?? 50,
     teamSize: payload.teamSize ?? room.battleConfig?.teamSize ?? 6,
-    useItems: payload.useItems ?? room.battleConfig?.useItems ?? false,
-    itemQuantity: payload.itemQuantity ?? room.battleConfig?.itemQuantity ?? 0,
+    useItems,
+    itemQuantity: itemSlotCount,
+    itemSlotCount,
+    itemStackLimit:
+      payload.itemStackLimit ?? room.battleConfig?.itemStackLimit ?? (useItems ? 3 : 0),
+    totalItemPool:
+      payload.totalItemPool ?? room.battleConfig?.totalItemPool ?? (useItems ? 10 : 0),
+    allowedItemTypes:
+      payload.allowedItemTypes ??
+      room.battleConfig?.allowedItemTypes ??
+      (useItems ? ["healing", "stat"] : []),
     format: payload.format ?? room.battleConfig?.format ?? "singles",
     maxPlayers:
       payload.maxPlayers ??
@@ -50,11 +67,15 @@ function configReplayPayload(room) {
   if (!c) return null;
   return {
     level: c.level,
-    itemQuantity: c.itemQuantity,
+    itemQuantity: c.itemSlotCount ?? c.itemQuantity,
     useItems: c.useItems,
     teamSize: c.teamSize,
     maxPlayers: c.maxPlayers,
     format: c.format,
+    allowedItemTypes: c.allowedItemTypes,
+    itemSlotCount: c.itemSlotCount ?? c.itemQuantity,
+    itemStackLimit: c.itemStackLimit,
+    totalItemPool: c.totalItemPool,
   };
 }
 
@@ -331,7 +352,13 @@ module.exports = (io, socket) => {
         return;
       }
       const battlers = data.payload?.battlers;
-      const result = battleEngine.lockTeam(room, socket.userId, battlers);
+      const bagItems = data.payload?.bagItems;
+      const result = battleEngine.lockTeam(
+        room,
+        socket.userId,
+        battlers,
+        bagItems,
+      );
       if (result.error) {
         socket.emit("gameEvent", {
           type: "battle:stateUpdate",

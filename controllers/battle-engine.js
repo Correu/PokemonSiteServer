@@ -25,6 +25,152 @@ function loadMovesCatalog() {
 
 loadMovesCatalog();
 
+const HEALING_CATEGORIES = new Set([
+  "healing",
+  "medicine",
+  "pp-recovery",
+  "revival",
+  "status-cures",
+]);
+const STAT_CATEGORIES = new Set(["stat-boosts", "vitamins", "species-specific"]);
+const BATTLE_ITEM_ID_MAX = 126;
+const EXCLUDED_ITEM_NAMES = new Set(["cheri-berry"]);
+
+let itemsCatalogById = {};
+
+function loadItemsCatalog() {
+  const catalogPath = path.join(__dirname, "..", "data", "items.json");
+  try {
+    const raw = fs.readFileSync(catalogPath, "utf8");
+    const items = JSON.parse(raw);
+    if (!Array.isArray(items)) {
+      throw new Error("items.json must be an array");
+    }
+    itemsCatalogById = {};
+    for (const item of items) {
+      if (item?.id) {
+        itemsCatalogById[String(item.id)] = item;
+      }
+    }
+  } catch (err) {
+    console.warn(
+      "[battle-engine] Could not load items catalog; item validation disabled.",
+      err.message,
+    );
+    itemsCatalogById = {};
+  }
+}
+
+loadItemsCatalog();
+
+function getItemBattleType(item) {
+  const category = item?.category?.name ?? "";
+  if (HEALING_CATEGORIES.has(category)) return "healing";
+  if (STAT_CATEGORIES.has(category)) return "stat";
+  return null;
+}
+
+function isHoldableItem(item) {
+  return (item?.attributes ?? []).some((a) => a.name === "holdable");
+}
+
+function isAllowedBattleItem(item, allowedTypes) {
+  if (!item) return false;
+  if (item.id > BATTLE_ITEM_ID_MAX) return false;
+  if (EXCLUDED_ITEM_NAMES.has(item.name)) return false;
+  const battleType = getItemBattleType(item);
+  if (!battleType) return false;
+  return allowedTypes.includes(battleType);
+}
+
+function validateItemLoadout(room, battlers, bagItems) {
+  const config = room.battleConfig ?? {};
+  const useItems = !!config.useItems;
+
+  const hasBag = Array.isArray(bagItems) && bagItems.length > 0;
+  const hasHeld = battlers.some((b) => b.heldItem?.id);
+
+  if (!useItems) {
+    if (hasBag || hasHeld) {
+      return { error: "Items are disabled for this match." };
+    }
+    return { bagItems: [] };
+  }
+
+  const allowedTypes = config.allowedItemTypes ?? ["healing", "stat"];
+  const itemSlotCount = config.itemSlotCount ?? config.itemQuantity ?? 6;
+  const itemStackLimit = config.itemStackLimit ?? 3;
+  const totalItemPool = config.totalItemPool ?? 10;
+
+  const normalizedBag = [];
+  let distinctCount = 0;
+  let totalQty = 0;
+  const bagIdSet = new Set();
+
+  for (const entry of bagItems ?? []) {
+    const qty = entry?.quantity ?? 0;
+    if (qty <= 0) continue;
+
+    const catalogItem = itemsCatalogById[String(entry.id)];
+    if (!catalogItem) {
+      return { error: `Invalid item id ${entry.id}.` };
+    }
+    if (!isAllowedBattleItem(catalogItem, allowedTypes)) {
+      return { error: `${catalogItem.name} is not allowed in this match.` };
+    }
+    if (qty > itemStackLimit) {
+      return {
+        error: `Cannot bring more than ${itemStackLimit} of ${catalogItem.name}.`,
+      };
+    }
+
+    distinctCount += 1;
+    totalQty += qty;
+    bagIdSet.add(entry.id);
+    normalizedBag.push({
+      id: catalogItem.id,
+      name: catalogItem.name,
+      quantity: qty,
+      remaining: qty,
+    });
+  }
+
+  if (distinctCount > itemSlotCount) {
+    return {
+      error: `You can only bring ${itemSlotCount} different item types.`,
+    };
+  }
+  if (totalQty > totalItemPool) {
+    return {
+      error: `Total item uses cannot exceed ${totalItemPool}.`,
+    };
+  }
+
+  for (const battler of battlers) {
+    const held = battler.heldItem;
+    if (!held?.id) {
+      battler.heldItem = null;
+      continue;
+    }
+    const catalogItem = itemsCatalogById[String(held.id)];
+    if (!catalogItem || !isAllowedBattleItem(catalogItem, allowedTypes)) {
+      return { error: `Held item ${held.name ?? held.id} is not allowed.` };
+    }
+    if (!isHoldableItem(catalogItem)) {
+      return { error: `${catalogItem.name} cannot be held.` };
+    }
+    const inBag = normalizedBag.find((b) => b.id === held.id);
+    if (!inBag || inBag.quantity < 1) {
+      return {
+        error: `Held item ${catalogItem.name} must be in your bag with quantity at least 1.`,
+      };
+    }
+    battler.heldItem = { id: catalogItem.id, name: catalogItem.name };
+  }
+
+  return { bagItems: normalizedBag };
+}
+
 function getMovePp(moveId) {
   const entry = movesCatalogById[String(moveId)];
   if (entry && typeof entry.pp === "number") {
@@ -288,7 +434,7 @@ function allUsersHaveTeams(room) {
   return room.users.every((id) => info.teams[id]?.battlers?.length > 0);
 }
 
-function lockTeam(room, playerId, battlers) {
+function lockTeam(room, playerId, battlers, bagItems) {
   const info = ensureBattleInfo(room);
   if (!Array.isArray(battlers) || battlers.length === 0) {
     return { error: "Team must include at least one Pokémon." };
@@ -303,6 +449,11 @@ function lockTeam(room, playerId, battlers) {
     return { error: "Battle already in progress." };
   }
 
+  const itemValidation = validateItemLoadout(room, battlers, bagItems);
+  if (itemValidation.error) {
+    return { error: itemValidation.error };
+  }
+
   for (const battler of battlers) {
     if (!Array.isArray(battler.moves) || battler.moves.length === 0) {
       return { error: "Each Pokémon must have at least one move." };
@@ -313,6 +464,7 @@ function lockTeam(room, playerId, battlers) {
   info.teams[playerId] = {
     battlers: battlers.map(cloneBattler),
     activeIndex: 0,
+    bagItems: itemValidation.bagItems ?? [],
   };
 
   if (!info.lockedPlayers.includes(playerId)) {
