@@ -8,6 +8,8 @@ services:
     environment:
       - NODE_ENV=development
       - CORS_ORIGIN=http://localhost:4200
+      - HOST=0.0.0.0
+      - PORT=3000
       # Uncomment to enable multi-instance room pub/sub:
       # - REDIS_URL=redis://redis:6379
     depends_on:
@@ -18,5 +20,3 @@ services:
     ports:
       - "6379:6379"
     command: ["redis-server", "--save", "", "--appendonly", "no"]
-      - HOST=0.0.0.0
-      - PORT=3000
