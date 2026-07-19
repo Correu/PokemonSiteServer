@@ -368,12 +368,16 @@ function buildStatePayload(room) {
   const info = room.battleInfo;
   const actives = {};
   const teamRemaining = {};
+  const teamSnapshot = {};
+  const bagSnapshot = {};
 
   for (const playerId of room.users) {
     const team = info.teams[playerId];
     if (!team) {
       actives[playerId] = null;
       teamRemaining[playerId] = 0;
+      teamSnapshot[playerId] = [];
+      bagSnapshot[playerId] = [];
       continue;
     }
     const active = getActiveBattler(team);
@@ -392,6 +396,21 @@ function buildStatePayload(room) {
         }
       : null;
     teamRemaining[playerId] = remainingCount(team);
+    teamSnapshot[playerId] = team.battlers.map((b, idx) => ({
+      name: b.name,
+      displayName: b.displayName,
+      speciesId: b.speciesId,
+      currentHp: b.currentHp,
+      maxHp: b.maxHp,
+      isFainted: b.isFainted,
+      isActive: idx === team.activeIndex,
+      frontSprite: b.frontSprite,
+    }));
+    bagSnapshot[playerId] = (team.bagItems ?? []).map((b) => ({
+      id: b.id,
+      name: b.name,
+      remaining: b.remaining,
+    }));
   }
 
   const awaitingMoves =
@@ -414,6 +433,8 @@ function buildStatePayload(room) {
     message: info.message,
     actives,
     teamRemaining,
+    teamSnapshot,
+    bagSnapshot,
     awaitingMoves,
     lockedPlayers: [...info.lockedPlayers],
     winnerId: info.winnerId,
@@ -546,6 +567,53 @@ function submitMove(room, playerId, moveId, turnNumber) {
   return resolvePendingTurn(room);
 }
 
+function resolveItemEffect(item, battler) {
+  const type = getItemBattleType(item);
+  const shortEffect =
+    item.effect_entries?.find((e) => e.language?.name === "en")
+      ?.short_effect ?? "";
+  const pokeName = battler.displayName || battler.name;
+
+  if (type === "healing") {
+    if (/full/i.test(shortEffect)) {
+      battler.currentHp = battler.maxHp;
+      return `${pokeName} was fully healed!`;
+    }
+    const flatMatch = shortEffect.match(/(\d+)\s*hp/i);
+    const amount = flatMatch ? parseInt(flatMatch[1], 10) : 20;
+    battler.currentHp = Math.min(battler.maxHp, battler.currentHp + amount);
+    return `${pokeName} restored ${amount} HP!`;
+  }
+
+  if (type === "stat") {
+    const name = item.name ?? "";
+    let stat = null;
+    let statLabel = "";
+    if (/x[\s-]?attack/i.test(name)) {
+      stat = "attack";
+      statLabel = "Attack";
+    } else if (/x[\s-]?defense/i.test(name)) {
+      stat = "defense";
+      statLabel = "Defense";
+    } else if (/x[\s-]?speed/i.test(name)) {
+      stat = "speed";
+      statLabel = "Speed";
+    } else if (/x[\s-]?sp|x[\s-]?special|x[\s-]?spatk/i.test(name)) {
+      stat = "specialAttack";
+      statLabel = "Sp. Atk";
+    } else if (/x[\s-]?accuracy/i.test(name)) {
+      stat = "speed";
+      statLabel = "Accuracy";
+    }
+    if (stat && battler.stats?.[stat]) {
+      battler.stats[stat] = Math.floor(battler.stats[stat] * 1.5);
+      return `${pokeName}'s ${statLabel} rose!`;
+    }
+  }
+
+  return `${pokeName} used ${item.name}!`;
+}
+
 function resolvePendingTurn(room) {
   const info = room.battleInfo;
   const playerIds = room.users.filter((id) => {
@@ -553,8 +621,43 @@ function resolvePendingTurn(room) {
     return team && remainingCount(team) > 0;
   });
 
-  const order = resolveTurnOrder(playerIds, info.pendingMoves, info.teams);
-  const logs = [];
+  const messageParts = [];
+
+  // Phase 1: Switches (resolve before everything else)
+  for (const playerId of playerIds) {
+    const pending = info.pendingMoves[playerId];
+    if (!pending?.isSwitch) continue;
+    const team = info.teams[playerId];
+    team.activeIndex = pending.switchToIndex;
+    const newActive = getActiveBattler(team);
+    const name = newActive?.displayName || newActive?.name || "Pokémon";
+    messageParts.push(`Go, ${name}!`);
+  }
+
+  // Phase 2: Items (resolve after switches, before attacks)
+  for (const playerId of playerIds) {
+    const pending = info.pendingMoves[playerId];
+    if (!pending?.isItem) continue;
+    const team = info.teams[playerId];
+    const bagItem = (team.bagItems ?? []).find(
+      (b) => b.id === pending.itemId && b.remaining > 0,
+    );
+    if (!bagItem) continue;
+    const catalogItem = itemsCatalogById[String(bagItem.id)];
+    const active = getActiveBattler(team);
+    if (active && catalogItem) {
+      const effectMsg = resolveItemEffect(catalogItem, active);
+      bagItem.remaining -= 1;
+      messageParts.push(effectMsg);
+    }
+  }
+
+  // Phase 3: Attacks in speed/priority order
+  const attackerIds = playerIds.filter((id) => {
+    const pending = info.pendingMoves[id];
+    return pending && !pending.isSwitch && !pending.isItem;
+  });
+  const order = resolveTurnOrder(attackerIds, info.pendingMoves, info.teams);
 
   for (const attackerId of order) {
     const defenderId = playerIds.find((id) => id !== attackerId);
@@ -588,15 +691,14 @@ function resolvePendingTurn(room) {
       defenderTeam,
     );
     if (log) {
-      logs.push(log);
       info.lastAction = log;
       const displayName = attacker.displayName || attacker.name;
-      info.message = `${displayName} used ${move.name}!`;
+      messageParts.push(`${displayName} used ${move.name}!`);
       if (log.damage > 0) {
-        info.message += ` It dealt ${log.damage} damage.`;
+        messageParts.push(`It dealt ${log.damage} damage.`);
       }
       if (log.targetFainted) {
-        info.message += " The opposing Pokémon fainted!";
+        messageParts.push("The opposing Pokémon fainted!");
       }
     }
 
@@ -620,7 +722,10 @@ function resolvePendingTurn(room) {
 
   info.turn += 1;
   info.pendingMoves = {};
-  info.message = `Turn ${info.turn}. Choose your move.`;
+  info.message =
+    messageParts.length > 0
+      ? `${messageParts.join(" ")} Turn ${info.turn}. Choose your move.`
+      : `Turn ${info.turn}. Choose your move.`;
 
   return { resolved: true, winnerId: null };
 }
@@ -643,10 +748,117 @@ function forfeitMatch(room, playerId) {
   return { winnerId };
 }
 
+function submitSwitch(room, playerId, pokemonIndex, turnNumber) {
+  const info = room.battleInfo;
+  if (!info || info.status !== "in-battle" || info.winnerId) {
+    return { error: "Battle is not active." };
+  }
+  if (!room.users.includes(playerId)) {
+    return { error: "You are not in this room." };
+  }
+  if (turnNumber !== info.turn) {
+    return { error: "Stale turn number." };
+  }
+  if (info.pendingMoves[playerId]) {
+    return { error: "Action already submitted." };
+  }
+
+  const team = info.teams[playerId];
+  if (!team || remainingCount(team) === 0) {
+    return { error: "You have no usable Pokémon." };
+  }
+
+  const battlers = team.battlers;
+  if (pokemonIndex < 0 || pokemonIndex >= battlers.length) {
+    return { error: "Invalid Pokémon index." };
+  }
+  if (battlers[pokemonIndex].isFainted) {
+    return { error: "That Pokémon has fainted." };
+  }
+  if (pokemonIndex === team.activeIndex) {
+    return { error: "That Pokémon is already in battle." };
+  }
+
+  info.pendingMoves[playerId] = {
+    isSwitch: true,
+    switchToIndex: pokemonIndex,
+    priority: 8,
+  };
+
+  const allSubmitted = room.users.every((id) => {
+    const t = info.teams[id];
+    if (!t || remainingCount(t) === 0) return true;
+    const a = getActiveBattler(t);
+    if (!a || a.isFainted) return true;
+    return !!info.pendingMoves[id];
+  });
+
+  if (!allSubmitted) {
+    info.message = "Waiting for opponent to choose an action…";
+    return { resolved: false };
+  }
+
+  return resolvePendingTurn(room);
+}
+
+function submitItem(room, playerId, itemId, turnNumber) {
+  const info = room.battleInfo;
+  if (!info || info.status !== "in-battle" || info.winnerId) {
+    return { error: "Battle is not active." };
+  }
+  if (!room.users.includes(playerId)) {
+    return { error: "You are not in this room." };
+  }
+  if (turnNumber !== info.turn) {
+    return { error: "Stale turn number." };
+  }
+  if (info.pendingMoves[playerId]) {
+    return { error: "Action already submitted." };
+  }
+
+  const team = info.teams[playerId];
+  if (!team) {
+    return { error: "You have no team." };
+  }
+
+  const bagItem = (team.bagItems ?? []).find(
+    (b) => b.id === itemId && b.remaining > 0,
+  );
+  if (!bagItem) {
+    return { error: "Item not available." };
+  }
+
+  info.pendingMoves[playerId] = { isItem: true, itemId, priority: 7 };
+
+  const allSubmitted = room.users.every((id) => {
+    const t = info.teams[id];
+    if (!t || remainingCount(t) === 0) return true;
+    const a = getActiveBattler(t);
+    if (!a || a.isFainted) return true;
+    return !!info.pendingMoves[id];
+  });
+
+  if (!allSubmitted) {
+    info.message = "Waiting for opponent to choose an action…";
+    return { resolved: false };
+  }
+
+  return resolvePendingTurn(room);
+}
+
+function resetBattle(room) {
+  room.battleInfo = initBattleInfo(room);
+  room.status = "team-select";
+  return { reset: true };
+}
+
 module.exports = {
   ensureBattleInfo,
   lockTeam,
   submitMove,
+  submitSwitch,
+  submitItem,
+  resetBattle,
   buildStatePayload,
   forfeitMatch,
 };

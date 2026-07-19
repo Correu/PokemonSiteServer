@@ -16,6 +16,9 @@ const ALLOWED_GAME_EVENT_TYPES = new Set([
   "battle:teamLock",
   "battle:stateUpdate",
   "battle:forfeit",
+  "battle:switch",
+  "battle:item",
+  "battle:rematch",
 ]);
 
 function isGameEventEnvelope(value) {
@@ -439,6 +442,78 @@ module.exports = (io, socket) => {
       }
       broadcastBattleState(io, roomId, room);
       console.log(`🏳️ Forfeit in room ${roomId}; winner ${result.winnerId}`);
+      return;
+    }
+
+    if (data.type === "battle:switch" && isGameEventEnvelope(data)) {
+      if (!room.users.includes(socket.userId) || room.status !== "in-battle") {
+        return;
+      }
+      const { pokemonIndex, turnNumber } = data.payload ?? {};
+      const result = battleEngine.submitSwitch(
+        room,
+        socket.userId,
+        pokemonIndex,
+        turnNumber,
+      );
+      if (result.error) {
+        socket.emit("gameEvent", {
+          type: "battle:stateUpdate",
+          version: 1,
+          payload: {
+            ...battleEngine.buildStatePayload(room),
+            message: result.error,
+          },
+        });
+        return;
+      }
+      broadcastBattleState(io, roomId, room);
+      if (result.winnerId) {
+        console.log(`🏆 Winner in room ${roomId}: ${result.winnerId}`);
+      }
+      return;
+    }
+
+    if (data.type === "battle:item" && isGameEventEnvelope(data)) {
+      if (!room.users.includes(socket.userId) || room.status !== "in-battle") {
+        return;
+      }
+      const { itemId, turnNumber } = data.payload ?? {};
+      const result = battleEngine.submitItem(
+        room,
+        socket.userId,
+        itemId,
+        turnNumber,
+      );
+      if (result.error) {
+        socket.emit("gameEvent", {
+          type: "battle:stateUpdate",
+          version: 1,
+          payload: {
+            ...battleEngine.buildStatePayload(room),
+            message: result.error,
+          },
+        });
+        return;
+      }
+      broadcastBattleState(io, roomId, room);
+      if (result.winnerId) {
+        console.log(`🏆 Winner in room ${roomId}: ${result.winnerId}`);
+      }
+      return;
+    }
+
+    if (data.type === "battle:rematch" && isGameEventEnvelope(data)) {
+      if (!room.users.includes(socket.userId)) {
+        return;
+      }
+      battleEngine.resetBattle(room);
+      io.to(roomId).emit("gameEvent", {
+        type: "battle:rematch",
+        version: 1,
+        payload: {},
+      });
+      console.log(`🔄 Rematch started in room ${roomId}`);
       return;
     }
 
