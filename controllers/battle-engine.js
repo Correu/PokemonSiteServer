@@ -25,14 +25,17 @@ function loadMovesCatalog() {
 
 loadMovesCatalog();
 
+// Allowed battle item categories. pp-recovery, vitamins, and species-specific
+// are excluded: pp-recovery needs per-move targeting UI, the others have no
+// meaningful in-battle effect.
 const HEALING_CATEGORIES = new Set([
   "healing",
   "medicine",
-  "pp-recovery",
-  "revival",
   "status-cures",
+  "revival",
 ]);
-const STAT_CATEGORIES = new Set(["stat-boosts", "vitamins", "species-specific"]);
+const STAT_CATEGORIES = new Set(["stat-boosts"]);
+
 const BATTLE_ITEM_ID_MAX = 126;
 const EXCLUDED_ITEM_NAMES = new Set(["cheri-berry"]);
 
@@ -204,6 +207,8 @@ function cloneBattler(battler) {
     ...battler,
     stats: { ...battler.stats },
     moves: battler.moves.map((m) => ({ ...m })),
+    statusCondition: battler.statusCondition ?? null,
+    sleepTurns: battler.sleepTurns ?? 0,
   };
   normalizeBattlerMoves(cloned);
   return cloned;
@@ -266,9 +271,15 @@ function calcDamage(attacker, defender, move) {
   const level = attacker.level;
   const power = move.power;
   const isSpecial = move.damageClass === "special";
-  const attack = isSpecial
+
+  // Burn halves the physical Attack stat
+  const rawAttack = isSpecial
     ? attacker.stats.specialAttack
     : attacker.stats.attack;
+  const burnMod =
+    !isSpecial && attacker.statusCondition === "burn" ? 0.5 : 1;
+  const attack = rawAttack * burnMod;
+
   const defense = isSpecial
     ? defender.stats.specialDefense
     : defender.stats.defense;
@@ -296,12 +307,33 @@ function applyMove(attackerId, defenderId, move, attackerTeam, defenderTeam) {
 
   move.currentPp = Math.max(0, (move.currentPp ?? 1) - 1);
 
+  // Attempt to inflict a status ailment on the defender
+  let ailmentInflicted = null;
+  if (!defender.isFainted && !defender.statusCondition) {
+    const moveMeta = movesCatalogById[String(move.id)]?.meta;
+    const ailment = moveMeta?.ailment;
+    if (ailment && ailment !== "none") {
+      const chance = moveMeta.ailmentChance ?? 0;
+      // chance === 0 means the ailment IS the move's primary purpose (guaranteed)
+      const willApply =
+        chance === 0 ? true : Math.random() * 100 < chance;
+      if (willApply) {
+        defender.statusCondition = ailment;
+        if (ailment === "sleep") {
+          defender.sleepTurns = Math.floor(Math.random() * 3) + 1;
+        }
+        ailmentInflicted = ailment;
+      }
+    }
+  }
+
   return {
     attackerId,
     moveName: move.name,
     damage,
     targetId: defenderId,
     targetFainted: defender.isFainted,
+    ailmentInflicted,
   };
 }
 
@@ -314,8 +346,19 @@ function resolveTurnOrder(playerIds, pendingMoves, teams) {
     if (prioA !== prioB) {
       return prioB - prioA;
     }
-    const speedA = getActiveBattler(teams[a])?.stats.speed ?? 0;
-    const speedB = getActiveBattler(teams[b])?.stats.speed ?? 0;
+    // Paralysis halves the effective Speed for turn-order purposes
+    const activeA = getActiveBattler(teams[a]);
+    const activeB = getActiveBattler(teams[b]);
+    const rawSpeedA = activeA?.stats.speed ?? 0;
+    const rawSpeedB = activeB?.stats.speed ?? 0;
+    const speedA =
+      activeA?.statusCondition === "paralysis"
+        ? Math.floor(rawSpeedA * 0.5)
+        : rawSpeedA;
+    const speedB =
+      activeB?.statusCondition === "paralysis"
+        ? Math.floor(rawSpeedB * 0.5)
+        : rawSpeedB;
     if (speedA !== speedB) {
       return speedB - speedA;
     }
@@ -393,6 +436,7 @@ function buildStatePayload(room) {
           backSprite: active.backSprite,
           isFainted: active.isFainted,
           moves: mapActiveMoves(active),
+          statusCondition: active.statusCondition ?? null,
         }
       : null;
     teamRemaining[playerId] = remainingCount(team);
@@ -405,12 +449,15 @@ function buildStatePayload(room) {
       isFainted: b.isFainted,
       isActive: idx === team.activeIndex,
       frontSprite: b.frontSprite,
+      statusCondition: b.statusCondition ?? null,
     }));
-    bagSnapshot[playerId] = (team.bagItems ?? []).map((b) => ({
-      id: b.id,
-      name: b.name,
-      remaining: b.remaining,
-    }));
+    bagSnapshot[playerId] = (team.bagItems ?? []).map((b) => {
+      const catalogItem = itemsCatalogById[String(b.id)];
+      const effect =
+        catalogItem?.effect_entries?.find((e) => e.language?.name === "en")
+          ?.short_effect ?? "";
+      return { id: b.id, name: b.name, remaining: b.remaining, effect };
+    });
   }
 
   const awaitingMoves =
@@ -567,14 +614,66 @@ function submitMove(room, playerId, moveId, turnNumber) {
   return resolvePendingTurn(room);
 }
 
+// Resolve the effect of a status-cure item on the active battler.
+function resolveStatusCureItem(item, battler, pokeName) {
+  const itemName = item.name ?? "";
+  let targetCondition = null;
+
+  if (/full[\s-]heal/i.test(itemName)) {
+    targetCondition = "all";
+  } else if (/antidote/i.test(itemName)) {
+    targetCondition = "poison";
+  } else if (/burn[\s-]heal/i.test(itemName)) {
+    targetCondition = "burn";
+  } else if (/ice[\s-]heal/i.test(itemName)) {
+    targetCondition = "freeze";
+  } else if (/awakening/i.test(itemName)) {
+    targetCondition = "sleep";
+  } else if (/paralyze[\s-]heal|parlyz[\s-]heal/i.test(itemName)) {
+    targetCondition = "paralysis";
+  }
+
+  if (!battler.statusCondition) {
+    return `But ${pokeName} has no status condition!`;
+  }
+
+  if (targetCondition === "all" || battler.statusCondition === targetCondition) {
+    const cured = battler.statusCondition;
+    battler.statusCondition = null;
+    battler.sleepTurns = 0;
+    return `${pokeName}'s ${cured} was cured!`;
+  }
+
+  return `But it had no effect on ${pokeName}!`;
+}
+
 function resolveItemEffect(item, battler) {
-  const type = getItemBattleType(item);
-  const shortEffect =
-    item.effect_entries?.find((e) => e.language?.name === "en")
-      ?.short_effect ?? "";
+  const category = item?.category?.name ?? "";
   const pokeName = battler.displayName || battler.name;
 
-  if (type === "healing") {
+  // Status-cure items (Antidote, Burn Heal, Awakening, Paralyze Heal, Full Heal)
+  if (category === "status-cures") {
+    return resolveStatusCureItem(item, battler, pokeName);
+  }
+
+  // Medicine category: Full Restore — heals HP and cures all status
+  if (category === "medicine") {
+    const wasHealed = battler.currentHp < battler.maxHp;
+    const hadStatus = !!battler.statusCondition;
+    battler.currentHp = battler.maxHp;
+    battler.statusCondition = null;
+    battler.sleepTurns = 0;
+    if (wasHealed && hadStatus) return `${pokeName} was fully restored!`;
+    if (wasHealed) return `${pokeName} was fully healed!`;
+    if (hadStatus) return `${pokeName}'s status was cured!`;
+    return `${pokeName} used ${item.name}!`;
+  }
+
+  // HP healing (Potion, Super Potion, Hyper Potion, Max Potion)
+  if (category === "healing") {
+    const shortEffect =
+      item.effect_entries?.find((e) => e.language?.name === "en")
+        ?.short_effect ?? "";
     if (/full/i.test(shortEffect)) {
       battler.currentHp = battler.maxHp;
       return `${pokeName} was fully healed!`;
@@ -585,30 +684,32 @@ function resolveItemEffect(item, battler) {
     return `${pokeName} restored ${amount} HP!`;
   }
 
-  if (type === "stat") {
-    const name = item.name ?? "";
-    let stat = null;
-    let statLabel = "";
-    if (/x[\s-]?attack/i.test(name)) {
-      stat = "attack";
-      statLabel = "Attack";
-    } else if (/x[\s-]?defense/i.test(name)) {
-      stat = "defense";
-      statLabel = "Defense";
-    } else if (/x[\s-]?speed/i.test(name)) {
-      stat = "speed";
-      statLabel = "Speed";
-    } else if (/x[\s-]?sp|x[\s-]?special|x[\s-]?spatk/i.test(name)) {
-      stat = "specialAttack";
-      statLabel = "Sp. Atk";
-    } else if (/x[\s-]?accuracy/i.test(name)) {
-      stat = "speed";
-      statLabel = "Accuracy";
-    }
-    if (stat && battler.stats?.[stat]) {
-      battler.stats[stat] = Math.floor(battler.stats[stat] * 1.5);
-      return `${pokeName}'s ${statLabel} rose!`;
-    }
+  // Stat boosts: X Attack, X Defense, X Speed, X Special, X Sp. Def, X Accuracy
+  const name = item.name ?? "";
+  let stat = null;
+  let statLabel = "";
+  if (/x[\s-]?attack/i.test(name)) {
+    stat = "attack";
+    statLabel = "Attack";
+  } else if (/x[\s-]?sp[\s-]?def/i.test(name)) {
+    stat = "specialDefense";
+    statLabel = "Sp. Def";
+  } else if (/x[\s-]?defense/i.test(name)) {
+    stat = "defense";
+    statLabel = "Defense";
+  } else if (/x[\s-]?speed/i.test(name)) {
+    stat = "speed";
+    statLabel = "Speed";
+  } else if (/x[\s-]?sp|x[\s-]?special|x[\s-]?spatk/i.test(name)) {
+    stat = "specialAttack";
+    statLabel = "Sp. Atk";
+  } else if (/x[\s-]?accuracy/i.test(name)) {
+    stat = "speed";
+    statLabel = "Accuracy";
+  }
+  if (stat && battler.stats?.[stat] !== undefined) {
+    battler.stats[stat] = Math.floor(battler.stats[stat] * 1.5);
+    return `${pokeName}'s ${statLabel} rose!`;
   }
 
   return `${pokeName} used ${item.name}!`;
@@ -623,7 +724,7 @@ function resolvePendingTurn(room) {
 
   const messageParts = [];
 
-  // Phase 1: Switches (resolve before everything else)
+  // Phase 1: Switches (highest priority — resolve before everything else)
   for (const playerId of playerIds) {
     const pending = info.pendingMoves[playerId];
     if (!pending?.isSwitch) continue;
@@ -644,15 +745,41 @@ function resolvePendingTurn(room) {
     );
     if (!bagItem) continue;
     const catalogItem = itemsCatalogById[String(bagItem.id)];
+    if (!catalogItem) continue;
+
+    const itemCategory = catalogItem.category?.name ?? "";
+
+    // Revival items target the first fainted bench member, not the active Pokémon
+    if (itemCategory === "revival") {
+      const faintedIdx = team.battlers.findIndex((b) => b.isFainted);
+      bagItem.remaining -= 1;
+      if (faintedIdx === -1) {
+        messageParts.push("But there are no fainted Pokémon to revive!");
+      } else {
+        const revived = team.battlers[faintedIdx];
+        const isMaxRevive = /max[\s-]revive/i.test(catalogItem.name);
+        revived.currentHp = isMaxRevive
+          ? revived.maxHp
+          : Math.floor(revived.maxHp / 2);
+        revived.isFainted = false;
+        const revivedName = revived.displayName || revived.name;
+        messageParts.push(
+          `${revivedName} was revived${isMaxRevive ? " to full health" : ""}!`,
+        );
+      }
+      continue;
+    }
+
+    // All other items target the currently active Pokémon
     const active = getActiveBattler(team);
-    if (active && catalogItem) {
+    if (active && !active.isFainted) {
       const effectMsg = resolveItemEffect(catalogItem, active);
       bagItem.remaining -= 1;
       messageParts.push(effectMsg);
     }
   }
 
-  // Phase 3: Attacks in speed/priority order
+  // Phase 3: Attacks in speed/priority order (with status-condition checks)
   const attackerIds = playerIds.filter((id) => {
     const pending = info.pendingMoves[id];
     return pending && !pending.isSwitch && !pending.isItem;
@@ -661,15 +788,11 @@ function resolvePendingTurn(room) {
 
   for (const attackerId of order) {
     const defenderId = playerIds.find((id) => id !== attackerId);
-    if (!defenderId) {
-      break;
-    }
+    if (!defenderId) break;
 
     const attackerTeam = info.teams[attackerId];
     const defenderTeam = info.teams[defenderId];
-    if (!attackerTeam || !defenderTeam) {
-      continue;
-    }
+    if (!attackerTeam || !defenderTeam) continue;
 
     const attacker = getActiveBattler(attackerTeam);
     const defender = getActiveBattler(defenderTeam);
@@ -677,11 +800,43 @@ function resolvePendingTurn(room) {
       continue;
     }
 
+    const attackerName = attacker.displayName || attacker.name;
+
+    // Status condition prevention check
+    let blocked = false;
+    if (attacker.statusCondition === "sleep") {
+      if (attacker.sleepTurns > 0) {
+        attacker.sleepTurns -= 1;
+        messageParts.push(`${attackerName} is fast asleep!`);
+        blocked = true;
+      } else {
+        // Wake-up turn: clear status but can't act this turn (Gen 1 rule)
+        attacker.statusCondition = null;
+        messageParts.push(`${attackerName} woke up!`);
+        blocked = true;
+      }
+    } else if (attacker.statusCondition === "freeze") {
+      if (Math.random() >= 0.2) {
+        // 80% chance to remain frozen
+        messageParts.push(`${attackerName} is frozen solid!`);
+        blocked = true;
+      } else {
+        attacker.statusCondition = null;
+        messageParts.push(`${attackerName} thawed out!`);
+        // Pokémon can act the turn it thaws
+      }
+    } else if (attacker.statusCondition === "paralysis") {
+      if (Math.random() < 0.25) {
+        messageParts.push(`${attackerName} is paralyzed! It can't move!`);
+        blocked = true;
+      }
+    }
+
+    if (blocked) continue;
+
     const pending = info.pendingMoves[attackerId];
     const move = attacker.moves.find((m) => m.id === pending?.moveId);
-    if (!move) {
-      continue;
-    }
+    if (!move) continue;
 
     const log = applyMove(
       attackerId,
@@ -692,10 +847,16 @@ function resolvePendingTurn(room) {
     );
     if (log) {
       info.lastAction = log;
-      const displayName = attacker.displayName || attacker.name;
-      messageParts.push(`${displayName} used ${move.name}!`);
+      messageParts.push(`${attackerName} used ${move.name}!`);
       if (log.damage > 0) {
         messageParts.push(`It dealt ${log.damage} damage.`);
+      }
+      if (log.ailmentInflicted) {
+        const defenderName =
+          getActiveBattler(defenderTeam)?.displayName ||
+          getActiveBattler(defenderTeam)?.name ||
+          "The opposing Pokémon";
+        messageParts.push(`${defenderName} was ${log.ailmentInflicted}ed!`);
       }
       if (log.targetFainted) {
         messageParts.push("The opposing Pokémon fainted!");
@@ -708,10 +869,41 @@ function resolvePendingTurn(room) {
     }
   }
 
+  // Auto-switch fainted active Pokémon
   for (const playerId of playerIds) {
     const team = info.teams[playerId];
-    if (team) {
-      autoSwitchIfNeeded(team);
+    if (team) autoSwitchIfNeeded(team);
+  }
+
+  if (checkWinner(room)) {
+    info.pendingMoves = {};
+    return { resolved: true, winnerId: info.winnerId };
+  }
+
+  // Phase 4: End-of-turn status damage (burn and poison)
+  const afterBattlePlayerIds = room.users.filter((id) => {
+    const team = info.teams[id];
+    return team && remainingCount(team) > 0;
+  });
+
+  for (const playerId of afterBattlePlayerIds) {
+    const team = info.teams[playerId];
+    if (!team) continue;
+    const active = getActiveBattler(team);
+    if (!active || active.isFainted) continue;
+
+    const name = active.displayName || active.name;
+
+    if (active.statusCondition === "burn") {
+      const dmg = Math.max(1, Math.floor(active.maxHp / 16));
+      active.currentHp = Math.max(0, active.currentHp - dmg);
+      if (active.currentHp === 0) active.isFainted = true;
+      messageParts.push(`${name} is hurt by its burn!`);
+    } else if (active.statusCondition === "poison") {
+      const dmg = Math.max(1, Math.floor(active.maxHp / 8));
+      active.currentHp = Math.max(0, active.currentHp - dmg);
+      if (active.currentHp === 0) active.isFainted = true;
+      messageParts.push(`${name} is hurt by poison!`);
     }
   }
 

@@ -242,6 +242,40 @@ module.exports = (io, socket) => {
       room.users.push(socket.userId);
       socket.to(key).emit("playerJoined", socket.userId);
       broadcastRoomPresence(io, key, room);
+
+      // Remap orphaned battle team entry to the new socket ID when exactly one
+      // team key has no matching user (i.e. a player reconnected with a new ID).
+      if (
+        room.battleInfo &&
+        (room.battleInfo.status === "in-battle" ||
+          room.battleInfo.status === "finished")
+      ) {
+        const currentUserSet = new Set(room.users);
+        const orphaned = Object.keys(room.battleInfo.teams).filter(
+          (id) => !currentUserSet.has(id),
+        );
+        if (orphaned.length === 1 && !room.battleInfo.teams[socket.userId]) {
+          const oldId = orphaned[0];
+          room.battleInfo.teams[socket.userId] = room.battleInfo.teams[oldId];
+          delete room.battleInfo.teams[oldId];
+
+          if (room.battleInfo.pendingMoves[oldId]) {
+            room.battleInfo.pendingMoves[socket.userId] =
+              room.battleInfo.pendingMoves[oldId];
+            delete room.battleInfo.pendingMoves[oldId];
+          }
+
+          const li = room.battleInfo.lockedPlayers.indexOf(oldId);
+          if (li !== -1) {
+            room.battleInfo.lockedPlayers[li] = socket.userId;
+          }
+
+          console.log(
+            `🔄 Remapped battle team from ${oldId} → ${socket.userId} in room ${key}.`,
+          );
+          broadcastBattleState(io, key, room);
+        }
+      }
     }
 
     socket.join(key);
@@ -447,6 +481,16 @@ module.exports = (io, socket) => {
 
     if (data.type === "battle:switch" && isGameEventEnvelope(data)) {
       if (!room.users.includes(socket.userId) || room.status !== "in-battle") {
+        const msg = room.status !== "in-battle"
+          ? "Battle is not active."
+          : "You are not in this room.";
+        if (room.battleInfo) {
+          socket.emit("gameEvent", {
+            type: "battle:stateUpdate",
+            version: 1,
+            payload: { ...battleEngine.buildStatePayload(room), message: msg },
+          });
+        }
         return;
       }
       const { pokemonIndex, turnNumber } = data.payload ?? {};
@@ -476,6 +520,16 @@ module.exports = (io, socket) => {
 
     if (data.type === "battle:item" && isGameEventEnvelope(data)) {
       if (!room.users.includes(socket.userId) || room.status !== "in-battle") {
+        const msg = room.status !== "in-battle"
+          ? "Battle is not active."
+          : "You are not in this room.";
+        if (room.battleInfo) {
+          socket.emit("gameEvent", {
+            type: "battle:stateUpdate",
+            version: 1,
+            payload: { ...battleEngine.buildStatePayload(room), message: msg },
+          });
+        }
         return;
       }
       const { itemId, turnNumber } = data.payload ?? {};
@@ -574,6 +628,36 @@ module.exports = (io, socket) => {
     console.log(`🎮 ${data.type} in room ${roomId} from ${socket.userId}`);
   });
 
+  socket.on("leaveRoom", (roomKey) => {
+    const room = rooms[roomKey];
+    if (!room) return;
+
+    const idx = room.users.indexOf(socket.userId);
+    if (idx !== -1) {
+      room.users.splice(idx, 1);
+      room.readyPlayers = room.readyPlayers.filter(
+        (id) => id !== socket.userId,
+      );
+    }
+
+    socket.leave(roomKey);
+    socket.to(roomKey).emit("playerLeft", socket.userId);
+
+    if (room.users.length === 0) {
+      if (room.countdownTimer) clearTimeout(room.countdownTimer);
+      clearTimeout(room.timer);
+      delete rooms[roomKey];
+      console.log(`🧹 Room ${roomKey} closed — all players left.`);
+    } else {
+      if (room.hostId === socket.userId) {
+        room.hostId = room.users[0];
+      }
+      broadcastRoomPresence(io, roomKey, room);
+    }
+
+    console.log(`🚪 ${socket.userId} explicitly left room ${roomKey}`);
+  });
+
   socket.on("disconnect", () => {
     for (const [roomKey, room] of Object.entries(rooms)) {
       const index = room.users.indexOf(socket.userId);
@@ -590,15 +674,27 @@ module.exports = (io, socket) => {
         socket.to(roomKey).emit("playerLeft", socket.userId);
 
         if (room.hostId === socket.userId || room.users.length === 0) {
-          if (room.countdownTimer) {
-            clearTimeout(room.countdownTimer);
+          const isBattleAlive =
+            room.users.length > 0 &&
+            (room.status === "in-battle" || room.status === "finished");
+
+          if (isBattleAlive) {
+            room.hostId = room.users[0];
+            broadcastRoomPresence(io, roomKey, room);
+            console.log(
+              `⚠️ Host disconnected from room ${roomKey} during battle; reassigned host to ${room.hostId}.`,
+            );
+          } else {
+            if (room.countdownTimer) {
+              clearTimeout(room.countdownTimer);
+            }
+            clearTimeout(room.timer);
+            delete rooms[roomKey];
+            io.in(roomKey).socketsLeave(roomKey);
+            console.log(
+              `🧹 Room ${roomKey} closed due to host disconnect or empty room.`,
+            );
           }
-          clearTimeout(room.timer);
-          delete rooms[roomKey];
-          io.in(roomKey).socketsLeave(roomKey);
-          console.log(
-            `🧹 Room ${roomKey} closed due to host disconnect or empty room.`,
-          );
         } else {
           broadcastRoomPresence(io, roomKey, room);
         }
