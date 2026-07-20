@@ -25,6 +25,49 @@ function loadMovesCatalog() {
 
 loadMovesCatalog();
 
+// Gen I–IX type effectiveness chart.
+// Row = attacking type, column = defending type.
+// Missing entries default to 1× (neutral).
+const TYPE_CHART = {
+  normal:   { rock: 0.5, ghost: 0, steel: 0.5 },
+  fire:     { fire: 0.5, water: 0.5, grass: 2, ice: 2, bug: 2, rock: 0.5, dragon: 0.5, steel: 2 },
+  water:    { fire: 2, water: 0.5, grass: 0.5, ground: 2, rock: 2, dragon: 0.5 },
+  electric: { water: 2, electric: 0.5, grass: 0.5, ground: 0, flying: 2, dragon: 0.5 },
+  grass:    { fire: 0.5, water: 2, grass: 0.5, poison: 0.5, ground: 2, flying: 0.5, bug: 0.5, rock: 2, dragon: 0.5, steel: 0.5 },
+  ice:      { fire: 0.5, water: 0.5, grass: 2, ice: 0.5, ground: 2, flying: 2, dragon: 2, steel: 0.5 },
+  fighting: { normal: 2, ice: 2, poison: 0.5, flying: 0.5, psychic: 0.5, bug: 0.5, rock: 2, ghost: 0, dark: 2, steel: 2, fairy: 0.5 },
+  poison:   { grass: 2, poison: 0.5, ground: 0.5, rock: 0.5, ghost: 0.5, steel: 0, fairy: 2 },
+  ground:   { fire: 2, electric: 2, grass: 0.5, poison: 2, flying: 0, bug: 0.5, rock: 2, steel: 2 },
+  flying:   { electric: 0.5, grass: 2, fighting: 2, bug: 2, rock: 0.5, steel: 0.5 },
+  psychic:  { fighting: 2, poison: 2, psychic: 0.5, dark: 0, steel: 0.5 },
+  bug:      { fire: 0.5, grass: 2, fighting: 0.5, flying: 0.5, psychic: 2, ghost: 0.5, dark: 2, steel: 0.5, fairy: 0.5, poison: 0.5 },
+  rock:     { fire: 2, ice: 2, fighting: 0.5, ground: 0.5, flying: 2, bug: 2, steel: 0.5 },
+  ghost:    { normal: 0, psychic: 2, ghost: 2, dark: 0.5 },
+  dragon:   { dragon: 2, steel: 0.5, fairy: 0 },
+  dark:     { fighting: 0.5, psychic: 2, ghost: 2, dark: 0.5, fairy: 0.5 },
+  steel:    { fire: 0.5, water: 0.5, electric: 0.5, ice: 2, rock: 2, steel: 0.5, fairy: 2 },
+  fairy:    { fire: 0.5, fighting: 2, poison: 0.5, dragon: 2, dark: 2, steel: 0.5 },
+};
+
+/**
+ * Returns the combined type effectiveness multiplier for a move of `moveType`
+ * against a defender with `defenderTypes` (1 or 2 types).
+ * Possible values: 0, 0.25, 0.5, 1, 2, 4.
+ */
+function getTypeMultiplier(moveType, defenderTypes) {
+  if (!moveType || !Array.isArray(defenderTypes) || defenderTypes.length === 0) {
+    return 1;
+  }
+  let mult = 1;
+  const attackType = moveType.toLowerCase();
+  for (const defType of defenderTypes) {
+    const row = TYPE_CHART[attackType];
+    const val = row?.[defType.toLowerCase()];
+    if (val !== undefined) mult *= val;
+  }
+  return mult;
+}
+
 // Allowed battle item categories. pp-recovery, vitamins, and species-specific
 // are excluded: pp-recovery needs per-move targeting UI, the others have no
 // meaningful in-battle effect.
@@ -207,8 +250,9 @@ function cloneBattler(battler) {
     ...battler,
     stats: { ...battler.stats },
     moves: battler.moves.map((m) => ({ ...m })),
-    statusCondition: battler.statusCondition ?? null,
+    statusConditions: [],
     sleepTurns: battler.sleepTurns ?? 0,
+    confusionTurns: battler.confusionTurns ?? 0,
   };
   normalizeBattlerMoves(cloned);
   return cloned;
@@ -265,7 +309,7 @@ function autoSwitchIfNeeded(team) {
 
 function calcDamage(attacker, defender, move) {
   if (!move || move.damageClass === "status" || !move.power) {
-    return 0;
+    return { damage: 0, typeMult: 1 };
   }
 
   const level = attacker.level;
@@ -277,7 +321,7 @@ function calcDamage(attacker, defender, move) {
     ? attacker.stats.specialAttack
     : attacker.stats.attack;
   const burnMod =
-    !isSpecial && attacker.statusCondition === "burn" ? 0.5 : 1;
+    !isSpecial && (attacker.statusConditions ?? []).includes("burn") ? 0.5 : 1;
   const attack = rawAttack * burnMod;
 
   const defense = isSpecial
@@ -287,8 +331,12 @@ function calcDamage(attacker, defender, move) {
   const base = Math.floor(
     (((2 * level) / 5 + 2) * power * (attack / Math.max(1, defense))) / 50 + 2,
   );
+  // STAB: 1.5× when move type matches one of the attacker's own types
+  const stab = (attacker.types ?? []).includes(move.type) ? 1.5 : 1;
+  // Type effectiveness (0 / 0.5 / 1 / 2 / 4)
+  const typeMult = getTypeMultiplier(move.type, defender.types);
   const variance = 0.85 + Math.random() * 0.15;
-  return Math.max(1, Math.floor(base * variance));
+  return { damage: Math.max(1, Math.floor(base * variance * stab * typeMult)), typeMult };
 }
 
 function applyMove(attackerId, defenderId, move, attackerTeam, defenderTeam) {
@@ -298,7 +346,7 @@ function applyMove(attackerId, defenderId, move, attackerTeam, defenderTeam) {
     return null;
   }
 
-  const damage = calcDamage(attacker, defender, move);
+  const { damage, typeMult } = calcDamage(attacker, defender, move);
   defender.currentHp = Math.max(0, defender.currentHp - damage);
   if (defender.currentHp <= 0) {
     defender.currentHp = 0;
@@ -309,20 +357,31 @@ function applyMove(attackerId, defenderId, move, attackerTeam, defenderTeam) {
 
   // Attempt to inflict a status ailment on the defender
   let ailmentInflicted = null;
-  if (!defender.isFainted && !defender.statusCondition) {
+  if (!defender.isFainted) {
     const moveMeta = movesCatalogById[String(move.id)]?.meta;
     const ailment = moveMeta?.ailment;
     if (ailment && ailment !== "none") {
       const chance = moveMeta.ailmentChance ?? 0;
       // chance === 0 means the ailment IS the move's primary purpose (guaranteed)
-      const willApply =
-        chance === 0 ? true : Math.random() * 100 < chance;
+      const willApply = chance === 0 ? true : Math.random() * 100 < chance;
       if (willApply) {
-        defender.statusCondition = ailment;
-        if (ailment === "sleep") {
-          defender.sleepTurns = Math.floor(Math.random() * 3) + 1;
+        if (ailment === "confusion") {
+          // Volatile status — can stack with primary statuses
+          if (!defender.confusionTurns) {
+            defender.confusionTurns = Math.floor(Math.random() * 4) + 2; // 2–5 turns
+            ailmentInflicted = "confusion";
+          }
+        } else {
+          // Primary status — stackable (multiple primary statuses allowed)
+          if (!defender.statusConditions) defender.statusConditions = [];
+          if (!defender.statusConditions.includes(ailment)) {
+            defender.statusConditions.push(ailment);
+            if (ailment === "sleep") {
+              defender.sleepTurns = Math.floor(Math.random() * 3) + 1;
+            }
+            ailmentInflicted = ailment;
+          }
         }
-        ailmentInflicted = ailment;
       }
     }
   }
@@ -331,6 +390,7 @@ function applyMove(attackerId, defenderId, move, attackerTeam, defenderTeam) {
     attackerId,
     moveName: move.name,
     damage,
+    typeMult,
     targetId: defenderId,
     targetFainted: defender.isFainted,
     ailmentInflicted,
@@ -352,11 +412,11 @@ function resolveTurnOrder(playerIds, pendingMoves, teams) {
     const rawSpeedA = activeA?.stats.speed ?? 0;
     const rawSpeedB = activeB?.stats.speed ?? 0;
     const speedA =
-      activeA?.statusCondition === "paralysis"
+      (activeA?.statusConditions ?? []).includes("paralysis")
         ? Math.floor(rawSpeedA * 0.5)
         : rawSpeedA;
     const speedB =
-      activeB?.statusCondition === "paralysis"
+      (activeB?.statusConditions ?? []).includes("paralysis")
         ? Math.floor(rawSpeedB * 0.5)
         : rawSpeedB;
     if (speedA !== speedB) {
@@ -436,7 +496,8 @@ function buildStatePayload(room) {
           backSprite: active.backSprite,
           isFainted: active.isFainted,
           moves: mapActiveMoves(active),
-          statusCondition: active.statusCondition ?? null,
+          statusConditions: active.statusConditions ?? [],
+          confusionTurns: active.confusionTurns ?? 0,
         }
       : null;
     teamRemaining[playerId] = remainingCount(team);
@@ -449,7 +510,8 @@ function buildStatePayload(room) {
       isFainted: b.isFainted,
       isActive: idx === team.activeIndex,
       frontSprite: b.frontSprite,
-      statusCondition: b.statusCondition ?? null,
+      statusConditions: b.statusConditions ?? [],
+      confusionTurns: b.confusionTurns ?? 0,
     }));
     bagSnapshot[playerId] = (team.bagItems ?? []).map((b) => {
       const catalogItem = itemsCatalogById[String(b.id)];
@@ -633,15 +695,21 @@ function resolveStatusCureItem(item, battler, pokeName) {
     targetCondition = "paralysis";
   }
 
-  if (!battler.statusCondition) {
+  if (!battler.statusConditions?.length) {
     return `But ${pokeName} has no status condition!`;
   }
 
-  if (targetCondition === "all" || battler.statusCondition === targetCondition) {
-    const cured = battler.statusCondition;
-    battler.statusCondition = null;
+  if (targetCondition === "all") {
+    battler.statusConditions = [];
     battler.sleepTurns = 0;
-    return `${pokeName}'s ${cured} was cured!`;
+    return `${pokeName}'s status was cleared!`;
+  }
+
+  const idx = battler.statusConditions.indexOf(targetCondition);
+  if (idx !== -1) {
+    battler.statusConditions.splice(idx, 1);
+    if (targetCondition === "sleep") battler.sleepTurns = 0;
+    return `${pokeName}'s ${targetCondition} was cured!`;
   }
 
   return `But it had no effect on ${pokeName}!`;
@@ -659,9 +727,9 @@ function resolveItemEffect(item, battler) {
   // Medicine category: Full Restore — heals HP and cures all status
   if (category === "medicine") {
     const wasHealed = battler.currentHp < battler.maxHp;
-    const hadStatus = !!battler.statusCondition;
+    const hadStatus = (battler.statusConditions ?? []).length > 0;
     battler.currentHp = battler.maxHp;
-    battler.statusCondition = null;
+    battler.statusConditions = [];
     battler.sleepTurns = 0;
     if (wasHealed && hadStatus) return `${pokeName} was fully restored!`;
     if (wasHealed) return `${pokeName} was fully healed!`;
@@ -729,6 +797,11 @@ function resolvePendingTurn(room) {
     const pending = info.pendingMoves[playerId];
     if (!pending?.isSwitch) continue;
     const team = info.teams[playerId];
+    // Clear volatile statuses (confusion) from the outgoing Pokémon
+    const outgoing = getActiveBattler(team);
+    if (outgoing) {
+      outgoing.confusionTurns = 0;
+    }
     team.activeIndex = pending.switchToIndex;
     const newActive = getActiveBattler(team);
     const name = newActive?.displayName || newActive?.name || "Pokémon";
@@ -804,31 +877,73 @@ function resolvePendingTurn(room) {
 
     // Status condition prevention check
     let blocked = false;
-    if (attacker.statusCondition === "sleep") {
+    const attackerStatuses = attacker.statusConditions ?? [];
+
+    // Sleep blocks first (highest priority)
+    if (attackerStatuses.includes("sleep")) {
       if (attacker.sleepTurns > 0) {
         attacker.sleepTurns -= 1;
         messageParts.push(`${attackerName} is fast asleep!`);
         blocked = true;
       } else {
-        // Wake-up turn: clear status but can't act this turn (Gen 1 rule)
-        attacker.statusCondition = null;
+        // Wake-up turn: clear sleep but still can't act this turn (Gen 1 rule)
+        attacker.statusConditions = attackerStatuses.filter((s) => s !== "sleep");
         messageParts.push(`${attackerName} woke up!`);
         blocked = true;
       }
-    } else if (attacker.statusCondition === "freeze") {
+    }
+
+    // Freeze (only if not already blocked by sleep)
+    if (!blocked && attackerStatuses.includes("freeze")) {
       if (Math.random() >= 0.2) {
         // 80% chance to remain frozen
         messageParts.push(`${attackerName} is frozen solid!`);
         blocked = true;
       } else {
-        attacker.statusCondition = null;
+        attacker.statusConditions = attacker.statusConditions.filter(
+          (s) => s !== "freeze"
+        );
         messageParts.push(`${attackerName} thawed out!`);
         // Pokémon can act the turn it thaws
       }
-    } else if (attacker.statusCondition === "paralysis") {
-      if (Math.random() < 0.25) {
+    }
+
+    // Paralysis — 80% chance to fail (stacks with other statuses)
+    if (!blocked && attackerStatuses.includes("paralysis")) {
+      if (Math.random() < 0.8) {
         messageParts.push(`${attackerName} is paralyzed! It can't move!`);
         blocked = true;
+      }
+    }
+
+    if (blocked) continue;
+
+    // Confusion check — volatile status, resolved after primary status checks
+    if (attacker.confusionTurns > 0) {
+      attacker.confusionTurns -= 1;
+      if (attacker.confusionTurns <= 0) {
+        messageParts.push(`${attackerName} snapped out of confusion!`);
+        // Falls through — can still use a move this turn
+      } else {
+        messageParts.push(`${attackerName} is confused!`);
+        if (Math.random() < 0.5) {
+          // Hurt itself in confusion: typeless physical, base power 40
+          const level = attacker.level ?? 50;
+          const atkStat = attacker.stats?.attack ?? 50;
+          const defStat = attacker.stats?.defense ?? 50;
+          const selfDmg = Math.max(
+            1,
+            Math.floor(
+              (((2 * level) / 5 + 2) * 40 * (atkStat / defStat)) / 50 + 2
+            )
+          );
+          attacker.currentHp = Math.max(0, attacker.currentHp - selfDmg);
+          if (attacker.currentHp === 0) attacker.isFainted = true;
+          messageParts.push(
+            `${attackerName} hurt itself in its confusion! (${selfDmg} damage)`
+          );
+          blocked = true;
+        }
       }
     }
 
@@ -850,13 +965,33 @@ function resolvePendingTurn(room) {
       messageParts.push(`${attackerName} used ${move.name}!`);
       if (log.damage > 0) {
         messageParts.push(`It dealt ${log.damage} damage.`);
+        if (log.typeMult === 0) {
+          const defName =
+            getActiveBattler(defenderTeam)?.displayName ||
+            getActiveBattler(defenderTeam)?.name ||
+            "The opposing Pokémon";
+          messageParts.push(`It doesn't affect ${defName}...`);
+        } else if (log.typeMult >= 2) {
+          messageParts.push("It's super effective!");
+        } else if (log.typeMult > 0 && log.typeMult < 1) {
+          messageParts.push("It's not very effective...");
+        }
       }
       if (log.ailmentInflicted) {
         const defenderName =
           getActiveBattler(defenderTeam)?.displayName ||
           getActiveBattler(defenderTeam)?.name ||
           "The opposing Pokémon";
-        messageParts.push(`${defenderName} was ${log.ailmentInflicted}ed!`);
+        const ailmentMsg = {
+          burn:      `${defenderName} was burned!`,
+          poison:    `${defenderName} was poisoned!`,
+          paralysis: `${defenderName} was paralyzed!`,
+          sleep:     `${defenderName} fell asleep!`,
+          freeze:    `${defenderName} was frozen solid!`,
+          confusion: `${defenderName} became confused!`,
+        }[log.ailmentInflicted] ??
+          `${defenderName} was afflicted with ${log.ailmentInflicted}!`;
+        messageParts.push(ailmentMsg);
       }
       if (log.targetFainted) {
         messageParts.push("The opposing Pokémon fainted!");
@@ -893,13 +1028,15 @@ function resolvePendingTurn(room) {
     if (!active || active.isFainted) continue;
 
     const name = active.displayName || active.name;
+    const endStatuses = active.statusConditions ?? [];
 
-    if (active.statusCondition === "burn") {
+    if (endStatuses.includes("burn")) {
       const dmg = Math.max(1, Math.floor(active.maxHp / 16));
       active.currentHp = Math.max(0, active.currentHp - dmg);
       if (active.currentHp === 0) active.isFainted = true;
       messageParts.push(`${name} is hurt by its burn!`);
-    } else if (active.statusCondition === "poison") {
+    }
+    if (endStatuses.includes("poison")) {
       const dmg = Math.max(1, Math.floor(active.maxHp / 8));
       active.currentHp = Math.max(0, active.currentHp - dmg);
       if (active.currentHp === 0) active.isFainted = true;
