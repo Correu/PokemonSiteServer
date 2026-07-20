@@ -1,1 +1,14 @@
 node_modules/
+
+# Environment files — never commit real credentials
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
